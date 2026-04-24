@@ -3,85 +3,143 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>FSDP Memory Estimator</title>
+  <meta name="description" content="Per-GPU memory estimator for PyTorch FSDP training." />
+  <title>FSDP·MEM·EST · per-gpu memory readout</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Major+Mono+Display&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <h1>FSDP Memory Estimator</h1>
-      <p class="tagline">Estimate per-GPU memory for PyTorch FSDP training. No backend required.</p>
+
+  <!-- Background atmosphere -->
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-scanlines" aria-hidden="true"></div>
+  <div class="bg-vignette" aria-hidden="true"></div>
+
+  <!-- ───────────── TOP STATUS BAR ───────────── -->
+  <div class="statusbar" aria-hidden="true">
+    <div class="sb-cluster">
+      <span class="sb-dot"></span>
+      <span class="sb-text">SYS · FSDP-MEM-EST</span>
+      <span class="sb-sep">/</span>
+      <span class="sb-text mute">v0.2.0</span>
     </div>
-    <a class="github-link" href="https://github.com/PopSoda2002/FSDP_memory_estimator" target="_blank" rel="noopener">GitHub</a>
+    <div class="sb-cluster center">
+      <span class="sb-text mute">REV</span>
+      <span class="sb-text" id="sb-rev">—</span>
+      <span class="sb-sep">/</span>
+      <span class="sb-text mute">UTC</span>
+      <span class="sb-text" id="sb-clock">--:--:--</span>
+    </div>
+    <div class="sb-cluster right">
+      <span class="sb-text status-ok">▮ LIVE</span>
+      <a class="sb-link" href="https://github.com/PopSoda2002/FSDP_memory_estimator" target="_blank" rel="noopener">SRC →</a>
+    </div>
+  </div>
+
+  <!-- ───────────── HERO ───────────── -->
+  <header class="hero">
+    <div class="hero-mark">
+      <span class="mark-id">[ 0.0.1 ]</span>
+      <span class="mark-tick">───────────</span>
+      <span class="mark-id">FACILITY · LOCAL</span>
+    </div>
+    <h1 class="hero-title">
+      <span class="ht-row">FSDP <em>memory</em></span>
+      <span class="ht-row ht-row--alt">estimator<span class="ht-dot">.</span></span>
+    </h1>
+    <p class="hero-sub">
+      Per-GPU peak <em>RAM</em> readout for PyTorch FSDP / FSDP2 training.
+      Sharding, mixed precision, activation checkpointing &mdash; modeled.
+      <span class="hero-meta">No backend. Open-source. <a href="https://github.com/PopSoda2002/FSDP_memory_estimator" target="_blank" rel="noopener">github →</a></span>
+    </p>
   </header>
 
-  <main class="layout">
+  <!-- ───────────── MAIN GRID ───────────── -->
+  <main class="grid">
 
-    <!-- ───────── Config column ───────── -->
-    <section class="panel config">
-      <div class="card">
-        <h2>Model</h2>
-        <div class="field">
-          <label for="model-preset">Preset</label>
-          <select id="model-preset"></select>
-        </div>
-        <div id="custom-fields" class="grid-2">
-          <div class="field">
-            <label for="hidden_size">hidden_size</label>
-            <input id="hidden_size" type="number" min="64" step="64" value="4096" />
-          </div>
-          <div class="field">
-            <label for="intermediate_size">intermediate_size</label>
-            <input id="intermediate_size" type="number" min="64" step="64" value="14336" />
-          </div>
-          <div class="field">
-            <label for="num_layers">num_layers</label>
-            <input id="num_layers" type="number" min="1" value="32" />
-          </div>
-          <div class="field">
-            <label for="num_heads">num_heads</label>
-            <input id="num_heads" type="number" min="1" value="32" />
-          </div>
-          <div class="field">
-            <label for="num_kv_heads">num_kv_heads</label>
-            <input id="num_kv_heads" type="number" min="1" value="8" />
-          </div>
-          <div class="field">
-            <label for="vocab_size">vocab_size</label>
-            <input id="vocab_size" type="number" min="1" value="128256" />
-          </div>
-          <div class="field checkbox">
-            <label>
-              <input id="tie_embeddings" type="checkbox" />
-              tie embeddings
-            </label>
-          </div>
-        </div>
-      </div>
+    <!-- ─── LEFT: CONFIG STACK ─── -->
+    <aside class="col-config">
 
-      <div class="card">
-        <h2>Training</h2>
-        <div class="grid-2">
-          <div class="field">
-            <label for="micro_batch">micro_batch</label>
-            <input id="micro_batch" type="number" min="1" value="1" />
+      <!-- 01 MODEL -->
+      <section class="module" data-mod="01">
+        <header class="mod-head">
+          <span class="mod-num">01</span>
+          <h2 class="mod-title">MODEL</h2>
+          <span class="mod-trail"></span>
+        </header>
+        <div class="mod-body">
+          <div class="row">
+            <label class="ldot" for="model-preset">preset<span class="dots"></span></label>
+            <select id="model-preset" class="cell wide"></select>
           </div>
-          <div class="field">
-            <label for="seq_len">seq_len</label>
-            <input id="seq_len" type="number" min="128" step="128" value="4096" />
+          <div id="custom-fields" class="custom-grid">
+            <div class="row">
+              <label class="ldot" for="hidden_size">hidden<span class="dots"></span></label>
+              <input id="hidden_size" class="cell num" type="number" min="64" step="64" value="4096" />
+            </div>
+            <div class="row">
+              <label class="ldot" for="intermediate_size">intermediate<span class="dots"></span></label>
+              <input id="intermediate_size" class="cell num" type="number" min="64" step="64" value="14336" />
+            </div>
+            <div class="row">
+              <label class="ldot" for="num_layers">layers<span class="dots"></span></label>
+              <input id="num_layers" class="cell num" type="number" min="1" value="32" />
+            </div>
+            <div class="row">
+              <label class="ldot" for="num_heads">heads<span class="dots"></span></label>
+              <input id="num_heads" class="cell num" type="number" min="1" value="32" />
+            </div>
+            <div class="row">
+              <label class="ldot" for="num_kv_heads">kv·heads<span class="dots"></span></label>
+              <input id="num_kv_heads" class="cell num" type="number" min="1" value="8" />
+            </div>
+            <div class="row">
+              <label class="ldot" for="vocab_size">vocab<span class="dots"></span></label>
+              <input id="vocab_size" class="cell num" type="number" min="1" value="128256" />
+            </div>
+            <div class="row toggle">
+              <label for="tie_embeddings" class="tgl">
+                <input id="tie_embeddings" type="checkbox" />
+                <span class="tgl-box"></span>
+                <span class="tgl-text">tie embeddings</span>
+              </label>
+            </div>
           </div>
-          <div class="field">
-            <label for="compute_dtype">compute dtype</label>
-            <select id="compute_dtype">
+        </div>
+      </section>
+
+      <!-- 02 TRAINING -->
+      <section class="module" data-mod="02">
+        <header class="mod-head">
+          <span class="mod-num">02</span>
+          <h2 class="mod-title">TRAINING</h2>
+          <span class="mod-trail"></span>
+        </header>
+        <div class="mod-body">
+          <div class="row">
+            <label class="ldot" for="micro_batch">micro·batch<span class="dots"></span></label>
+            <input id="micro_batch" class="cell num" type="number" min="1" value="1" />
+          </div>
+          <div class="row">
+            <label class="ldot" for="seq_len">seq·len<span class="dots"></span></label>
+            <input id="seq_len" class="cell num" type="number" min="128" step="128" value="4096" />
+          </div>
+          <div class="row">
+            <label class="ldot" for="compute_dtype">compute·dtype<span class="dots"></span></label>
+            <select id="compute_dtype" class="cell">
               <option value="bf16" selected>bf16</option>
               <option value="fp16">fp16</option>
               <option value="fp32">fp32</option>
             </select>
           </div>
-          <div class="field">
-            <label for="optimizer">optimizer</label>
-            <select id="optimizer">
+          <div class="row">
+            <label class="ldot" for="optimizer">optimizer<span class="dots"></span></label>
+            <select id="optimizer" class="cell">
               <option value="adamw" selected>AdamW</option>
               <option value="adam">Adam</option>
               <option value="sgd_momentum">SGD + momentum</option>
@@ -89,112 +147,179 @@
               <option value="adam_8bit">Adam 8-bit (bnb)</option>
             </select>
           </div>
-          <div class="field">
-            <label for="act_ckpt">activation checkpointing</label>
-            <select id="act_ckpt">
+          <div class="row">
+            <label class="ldot" for="act_ckpt">act·ckpt<span class="dots"></span></label>
+            <select id="act_ckpt" class="cell">
               <option value="none">none</option>
               <option value="selective" selected>selective</option>
               <option value="full">full</option>
             </select>
           </div>
-          <div class="field checkbox">
-            <label>
+          <div class="row toggle">
+            <label for="flash_attn" class="tgl">
               <input id="flash_attn" type="checkbox" checked />
-              FlashAttention
+              <span class="tgl-box"></span>
+              <span class="tgl-text">FlashAttention</span>
             </label>
-            <label>
+          </div>
+          <div class="row toggle">
+            <label for="ckpt_lm_head" class="tgl">
               <input id="ckpt_lm_head" type="checkbox" />
-              checkpoint lm_head
+              <span class="tgl-box"></span>
+              <span class="tgl-text">checkpoint lm_head</span>
             </label>
           </div>
         </div>
-      </div>
+      </section>
 
-      <div class="card">
-        <h2>FSDP &amp; Hardware</h2>
-        <div class="grid-2">
-          <div class="field">
-            <label for="strategy">sharding strategy</label>
-            <select id="strategy">
-              <option value="FULL_SHARD" selected>FULL_SHARD (ZeRO-3)</option>
-              <option value="SHARD_GRAD_OP">SHARD_GRAD_OP (ZeRO-2)</option>
+      <!-- 03 FSDP & HARDWARE -->
+      <section class="module" data-mod="03">
+        <header class="mod-head">
+          <span class="mod-num">03</span>
+          <h2 class="mod-title">FSDP · HW</h2>
+          <span class="mod-trail"></span>
+        </header>
+        <div class="mod-body">
+          <div class="row">
+            <label class="ldot" for="strategy">strategy<span class="dots"></span></label>
+            <select id="strategy" class="cell wide">
+              <option value="FULL_SHARD" selected>FULL_SHARD · ZeRO-3</option>
+              <option value="SHARD_GRAD_OP">SHARD_GRAD_OP · ZeRO-2</option>
               <option value="HYBRID_SHARD">HYBRID_SHARD</option>
-              <option value="NO_SHARD">NO_SHARD (DDP)</option>
+              <option value="NO_SHARD">NO_SHARD · DDP</option>
             </select>
           </div>
-          <div class="field">
-            <label for="world_size">world_size (GPUs)</label>
-            <input id="world_size" type="number" min="1" value="8" />
+          <div class="row">
+            <label class="ldot" for="world_size">world·size<span class="dots"></span></label>
+            <input id="world_size" class="cell num" type="number" min="1" value="8" />
           </div>
-          <div class="field" id="shard-size-row" style="display:none">
-            <label for="shard_size">shard_size (per replica)</label>
-            <input id="shard_size" type="number" min="1" value="8" />
+          <div class="row" id="shard-size-row" style="display:none">
+            <label class="ldot" for="shard_size">shard·size<span class="dots"></span></label>
+            <input id="shard_size" class="cell num" type="number" min="1" value="8" />
           </div>
-          <div class="field">
-            <label for="gpu">GPU type</label>
-            <select id="gpu"></select>
+          <div class="row">
+            <label class="ldot" for="gpu">device<span class="dots"></span></label>
+            <select id="gpu" class="cell wide"></select>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
+    </aside>
 
-    <!-- ───────── Results column ───────── -->
-    <section class="panel results">
-      <div class="kpis">
-        <div class="kpi">
-          <span class="kpi-label">Parameters</span>
-          <span class="kpi-value" id="kpi-params">—</span>
-        </div>
-        <div class="kpi">
-          <span class="kpi-label">Per-GPU peak</span>
-          <span class="kpi-value" id="kpi-total">—</span>
-        </div>
-        <div class="kpi">
-          <span class="kpi-label">Fit</span>
-          <span class="kpi-fit" id="kpi-fit">—</span>
-        </div>
-      </div>
+    <!-- ─── RIGHT: TELEMETRY READOUT ─── -->
+    <section class="col-readout">
 
-      <div class="card">
-        <h2>Memory breakdown</h2>
-        <div class="chart-box tall">
-          <canvas id="chart-breakdown"></canvas>
+      <!-- KPI BANNER -->
+      <div class="kpi-banner" data-mod="OUT">
+        <div class="banner-axis">
+          <span class="ax-label">PEAK · RAM</span>
+          <span class="ax-tick"></span>
         </div>
-      </div>
 
-      <div class="grid-2">
-        <div class="card">
-          <h2>Composition</h2>
-          <div class="chart-box">
-            <canvas id="chart-pie"></canvas>
+        <div class="kpi kpi-primary">
+          <span class="kpi-tag">▮ PER-GPU PEAK</span>
+          <span class="kpi-readout" id="kpi-total">—</span>
+          <span class="kpi-unit">gigabytes</span>
+        </div>
+
+        <div class="kpi kpi-secondary">
+          <span class="kpi-tag">▯ PARAMS</span>
+          <span class="kpi-readout small" id="kpi-params">—</span>
+          <span class="kpi-unit">total weights</span>
+        </div>
+
+        <div class="kpi kpi-fit-cell">
+          <span class="kpi-tag">▯ FIT</span>
+          <div class="fit-meter">
+            <div class="fit-meter-bar" id="fit-bar"></div>
+            <div class="fit-meter-ticks" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
           </div>
-        </div>
-        <div class="card">
-          <h2>Components</h2>
-          <table class="components">
-            <thead>
-              <tr><th>Component</th><th class="num">GB</th><th class="num">%</th></tr>
-            </thead>
-            <tbody id="component-table"></tbody>
-          </table>
+          <span class="kpi-readout fit" id="kpi-fit">—</span>
         </div>
       </div>
 
-      <div class="card">
-        <h2>Sweep over world_size</h2>
-        <div class="chart-box tall">
-          <canvas id="chart-sweep"></canvas>
+      <!-- BREAKDOWN BAR -->
+      <section class="module module-flush" data-mod="04">
+        <header class="mod-head">
+          <span class="mod-num">04</span>
+          <h2 class="mod-title">BREAKDOWN · STACKED</h2>
+          <span class="mod-trail"></span>
+        </header>
+        <div class="mod-body chart">
+          <div class="chart-box tall">
+            <canvas id="chart-breakdown"></canvas>
+          </div>
         </div>
+      </section>
+
+      <div class="dual">
+        <!-- COMPOSITION DOUGHNUT -->
+        <section class="module module-flush" data-mod="05">
+          <header class="mod-head">
+            <span class="mod-num">05</span>
+            <h2 class="mod-title">COMPOSITION</h2>
+            <span class="mod-trail"></span>
+          </header>
+          <div class="mod-body chart">
+            <div class="chart-box square">
+              <canvas id="chart-pie"></canvas>
+            </div>
+          </div>
+        </section>
+
+        <!-- COMPONENT TABLE -->
+        <section class="module module-flush" data-mod="06">
+          <header class="mod-head">
+            <span class="mod-num">06</span>
+            <h2 class="mod-title">COMPONENTS · LEDGER</h2>
+            <span class="mod-trail"></span>
+          </header>
+          <div class="mod-body">
+            <table class="ledger">
+              <thead>
+                <tr>
+                  <th>component</th>
+                  <th class="num">size · GB</th>
+                  <th class="num">% peak</th>
+                </tr>
+              </thead>
+              <tbody id="component-table"></tbody>
+            </table>
+          </div>
+        </section>
       </div>
+
+      <!-- SWEEP -->
+      <section class="module module-flush" data-mod="07">
+        <header class="mod-head">
+          <span class="mod-num">07</span>
+          <h2 class="mod-title">SCALING · WORLD_SIZE SWEEP</h2>
+          <span class="mod-trail"></span>
+        </header>
+        <div class="mod-body chart">
+          <div class="chart-box tall">
+            <canvas id="chart-sweep"></canvas>
+          </div>
+        </div>
+      </section>
 
       <p class="error" id="error"></p>
     </section>
   </main>
 
-  <footer>
-    <p>Estimator only — see README for caveats. Inspired by
-      <a href="https://huggingface.co/spaces/ISEEKYAN/megatron_memory_estimator" target="_blank" rel="noopener">megatron_memory_estimator</a>.
-    </p>
+  <!-- ───────────── FOOTER ───────────── -->
+  <footer class="footer">
+    <div class="ft-rule"></div>
+    <div class="ft-row">
+      <span class="ft-cell">EST &middot; <span class="amber">±15%</span> of measured peak</span>
+      <span class="ft-cell">FORMULAS &middot; see <code>script.js</code></span>
+      <span class="ft-cell">INSP &middot; <a href="https://huggingface.co/spaces/ISEEKYAN/megatron_memory_estimator" target="_blank" rel="noopener">megatron_memory_estimator</a></span>
+    </div>
+    <div class="ft-mark">
+      <span>━━━━━━━━━━ END · TRANSMISSION ━━━━━━━━━━</span>
+    </div>
   </footer>
 
   <script src="presets.js"></script>
