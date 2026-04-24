@@ -184,29 +184,55 @@ const fmtParams = (n) => {
 };
 
 let breakdownChart, pieChart, sweepChart;
-// Telemetry palette — matches CSS custom properties.
+
+// Tonal palette: ordered by component dominance.
+// Activations & Optimizer typically dominate, so they get the accent shades;
+// the rest fade toward neutral grays.
 const COLORS = {
-  "Parameters":       "#ffb547", // amber (dominant)
-  "Gradients":        "#5eead4", // teal
-  "Optimizer states": "#d6a86a", // tan
-  "Activations":      "#f87171", // rose
-  "Comm buffers":     "#7ee2b8", // mint
-  "Framework":        "#525c70", // muted
+  "Activations":      "#c14a16",   // accent terracotta
+  "Optimizer states": "#d97f4c",   // accent · light
+  "Parameters":       "#a89478",   // warm tan
+  "Gradients":        "#806f5a",   // muted brown
+  "Framework":        "#a39a8a",   // ink-faint
+  "Comm buffers":     "#c9c0ae",   // soft
 };
-const INK       = "#dde2ea";
-const INK_MUTE  = "#6e7793";
-const INK_FAINT = "#404a64";
-const RULE      = "#1c2230";
-const AMBER     = "#ffb547";
-const ROSE      = "#f87171";
+const INK         = "#1a1814";
+const INK_MUTE    = "#6d6457";
+const INK_FAINT   = "#a39a8a";
+const RULE        = "#d9d2c2";
+const RULE_SOFT   = "rgba(26,24,20,0.10)";
+const ACCENT      = "#c14a16";
+const ACCENT_DEEP = "#8d3209";
+const PAPER       = "#f4f0e8";
 
 // Apply Chart.js global defaults once.
 if (window.Chart) {
-  Chart.defaults.font.family = '"IBM Plex Mono", ui-monospace, "SF Mono", monospace';
-  Chart.defaults.font.size   = 11;
+  Chart.defaults.font.family = '"Newsreader", "Iowan Old Style", Georgia, serif';
+  Chart.defaults.font.size   = 12;
   Chart.defaults.color       = INK_MUTE;
   Chart.defaults.borderColor = RULE;
-  Chart.defaults.animation   = { duration: 480, easing: "easeOutQuart" };
+  Chart.defaults.animation   = { duration: 360, easing: "easeOutQuart" };
+}
+
+// Pretty model name + a short prose summary that gives the headline number context.
+function describeRun(cfg, result) {
+  const presetName = $("model-preset").value;
+  const modelLabel = (presetName === "custom") ? "your custom model" : presetName;
+  const strat = {
+    FULL_SHARD:   "FULL_SHARD",
+    SHARD_GRAD_OP:"SHARD_GRAD_OP",
+    HYBRID_SHARD: "HYBRID_SHARD",
+    NO_SHARD:     "DDP",
+  }[cfg.strategy] || cfg.strategy;
+  const ckpt = cfg.act_ckpt === "none" ? "no checkpointing" : `${cfg.act_ckpt} checkpointing`;
+  const fa   = cfg.flash_attn ? "FlashAttention on" : "FlashAttention off";
+  const opt  = ({ adamw: "AdamW", adam: "Adam", sgd_momentum: "SGD+momentum", sgd: "SGD", adam_8bit: "Adam 8-bit" })[cfg.optimizer];
+  const gpu  = window.GPU_PRESETS[cfg.gpu]?.name || cfg.gpu;
+  return (
+    `Training <strong>${modelLabel}</strong> on <strong>${cfg.world_size}× ${gpu}</strong> ` +
+    `with <strong>${strat}</strong>, <strong>${cfg.compute_dtype}</strong> precision and <strong>${opt}</strong>, ` +
+    `at micro-batch <strong>${cfg.micro_batch}</strong> × seq <strong>${cfg.seq_len}</strong>, ${ckpt}, ${fa}.`
+  );
 }
 
 function readConfig() {
@@ -265,97 +291,95 @@ function syncStrategyFields() {
 }
 
 function renderResult(cfg, result) {
-  // ── KPI banner ──
-  $("kpi-params").textContent = fmtParams(result.P);
-  $("kpi-total").textContent  = fmtGB(result.total);
+  // ── Headline figure ──
+  $("kpi-total").textContent = fmtGB(result.total);
+  $("caption").innerHTML     = describeRun(cfg, result);
 
-  // GPU fit indicator
+  // GPU fit
   const gpu = window.GPU_PRESETS[cfg.gpu];
   const totalGB = result.total / GB;
   const fitEl = $("kpi-fit");
   const barEl = $("fit-bar");
   if (gpu) {
     const pct = (totalGB / gpu.mem_gb) * 100;
-    const cls = pct < 70 ? "ok" : pct < 95 ? "warn" : "bad";
-    fitEl.textContent = `${pct.toFixed(0)}% · ${gpu.name}`;
-    fitEl.className = "kpi-readout fit " + cls;
+    const cls = pct < 70 ? "" : pct < 95 ? "warn" : "bad";
+    fitEl.innerHTML =
+      `<span><em>${fmtGB(result.total)} GB</em> of <em>${gpu.mem_gb} GB</em> available on each ${gpu.name}.</span>` +
+      `<span class="end">${pct.toFixed(0)}%</span>`;
     barEl.style.width = Math.min(100, pct).toFixed(1) + "%";
-    barEl.className = "fit-meter-bar " + cls;
+    barEl.className = "fit-line-fill " + cls;
   } else {
     fitEl.textContent = "—";
-    fitEl.className = "kpi-readout fit";
     barEl.style.width = "0%";
-    barEl.className = "fit-meter-bar";
+    barEl.className = "fit-line-fill";
   }
 
-  // ── Component ledger ──
-  const tableBody = $("component-table");
-  tableBody.innerHTML = "";
-  for (const [k, v] of Object.entries(result.components)) {
+  // ── Ledger table ──
+  const ordered = Object.entries(result.components)
+    .sort((a, b) => b[1] - a[1]); // largest first
+  const tbody = $("component-table");
+  tbody.innerHTML = "";
+  for (const [k, v] of ordered) {
     const pct = (v / result.total * 100).toFixed(1);
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><span class="swatch" style="background:${COLORS[k]}"></span>${k}</td>
       <td class="num">${fmtGB(v)}</td>
       <td class="num">${pct}%</td>`;
-    tableBody.appendChild(tr);
+    tbody.appendChild(tr);
   }
+  $("ledger-total").textContent = fmtGB(result.total);
 
-  // ── Chart palette ──
-  const labels = Object.keys(result.components);
-  const data   = Object.values(result.components).map(b => b / GB);
+  // ── Chart palette (matches ledger order) ──
+  const labels = ordered.map(([k]) => k);
+  const data   = ordered.map(([, v]) => v / GB);
   const colors = labels.map(l => COLORS[l]);
 
-  const axisCfg = {
-    grid:   { color: RULE, drawTicks: false, lineWidth: 1 },
-    ticks:  { color: INK_MUTE, font: { size: 10 }, padding: 8 },
-    border: { color: RULE_STRONG_FOR_AXIS },
+  const axisX = {
+    grid:   { color: RULE_SOFT, drawTicks: false },
+    ticks:  { color: INK_MUTE, font: { size: 11, family: '"Newsreader", serif', style: "italic" }, padding: 6 },
+    border: { color: RULE },
+  };
+  const axisY = {
+    grid:   { color: RULE_SOFT, drawTicks: false },
+    ticks:  { color: INK_MUTE, font: { size: 11, family: '"Newsreader", serif', style: "italic" }, padding: 8 },
+    border: { color: RULE },
   };
 
-  // ── Stacked bar (horizontal, full-width readout) ──
+  // ── Slim horizontal stacked bar (single row, no legend, no axes) ──
   if (breakdownChart) breakdownChart.destroy();
   breakdownChart = new Chart($("chart-breakdown"), {
     type: "bar",
     data: {
-      labels: ["▮ PER-GPU"],
+      labels: [""],
       datasets: labels.map((l, idx) => ({
         label: l,
         data: [data[idx]],
         backgroundColor: colors[idx],
-        borderColor: "#08090c",
+        borderColor: PAPER,
         borderWidth: 1,
         borderSkipped: false,
-        barThickness: 40,
+        barPercentage: 1,
+        categoryPercentage: 1,
       })),
     },
     options: {
       indexAxis: "y",
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { top: 6, right: 12 } },
+      layout: { padding: 0 },
       scales: {
-        x: {
-          stacked: true,
-          title:  { display: true, text: "GIGABYTES", color: INK_MUTE, font: { size: 10, weight: "500" } },
-          grid:   { color: RULE, drawTicks: false },
-          ticks:  { color: INK_MUTE, font: { size: 10 }, padding: 6 },
-          border: { color: RULE },
-        },
-        y: {
-          stacked: true,
-          grid:   { display: false },
-          ticks:  { color: AMBER, font: { size: 11, weight: "600" } },
-          border: { color: RULE },
-        },
+        x: { stacked: true, display: false, grid: { display: false } },
+        y: { stacked: true, display: false, grid: { display: false } },
       },
       plugins: {
-        tooltip: tooltipStyle((ctx) => `${ctx.dataset.label}  ${ctx.parsed.x.toFixed(2)} GB`),
-        legend:  legendStyle(),
+        tooltip: tooltipStyle((ctx) => `${ctx.dataset.label} — ${ctx.parsed.x.toFixed(2)} GB`),
+        legend:  { display: false },
       },
     },
   });
 
-  // ── Doughnut ──
+  // ── Doughnut, monochrome-ish ──
   if (pieChart) pieChart.destroy();
   pieChart = new Chart($("chart-pie"), {
     type: "doughnut",
@@ -364,61 +388,52 @@ function renderResult(cfg, result) {
       datasets: [{
         data,
         backgroundColor: colors,
-        borderColor: "#08090c",
+        borderColor: PAPER,
         borderWidth: 2,
-        hoverBorderColor: "#08090c",
-        hoverOffset: 6,
+        hoverBorderColor: PAPER,
+        hoverOffset: 4,
       }],
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      cutout: "62%",
+      cutout: "65%",
       plugins: {
-        tooltip: tooltipStyle((ctx) => `${ctx.label}  ${ctx.parsed.toFixed(2)} GB`),
-        legend:  legendStyle({ position: "bottom", boxWidth: 8, boxHeight: 8 }),
+        tooltip: tooltipStyle((ctx) => `${ctx.label} — ${ctx.parsed.toFixed(2)} GB`),
+        legend:  { display: false },
       },
     },
   });
 
-  // ── Sweep over world_size ──
+  // ── Sweep curve — single thin terracotta line, dashed reference ──
   const sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
-  const sweepData = sizes.map(N => {
-    const c = { ...cfg, world_size: N };
-    return estimate(c).total / GB;
-  });
-  // Build vertical-gradient fill for the area under the line
-  const sweepCanvas = $("chart-sweep");
-  const ctx2d = sweepCanvas.getContext("2d");
-  const grad  = ctx2d.createLinearGradient(0, 0, 0, sweepCanvas.height || 320);
-  grad.addColorStop(0, "rgba(255, 181, 71, 0.32)");
-  grad.addColorStop(1, "rgba(255, 181, 71, 0)");
+  const sweepData = sizes.map(N => estimate({ ...cfg, world_size: N }).total / GB);
 
   if (sweepChart) sweepChart.destroy();
-  sweepChart = new Chart(sweepCanvas, {
+  sweepChart = new Chart($("chart-sweep"), {
     type: "line",
     data: {
       labels: sizes,
       datasets: [
         {
-          label: "per-gpu peak",
+          label: "per-GPU peak",
           data: sweepData,
-          borderColor: AMBER,
-          backgroundColor: grad,
-          borderWidth: 1.5,
+          borderColor: ACCENT,
+          backgroundColor: "rgba(193,74,22,0.06)",
+          borderWidth: 1.4,
+          tension: 0.3,
           fill: true,
-          tension: 0.25,
           pointRadius: 3,
-          pointBackgroundColor: AMBER,
-          pointBorderColor: "#08090c",
-          pointBorderWidth: 1,
+          pointBackgroundColor: PAPER,
+          pointBorderColor: ACCENT,
+          pointBorderWidth: 1.2,
           pointHoverRadius: 5,
         },
         ...(gpu ? [{
           label: `${gpu.name} ceiling`,
-          data: sizes.map(_ => gpu.mem_gb),
-          borderColor: ROSE,
-          borderDash: [4, 4],
+          data: sizes.map(() => gpu.mem_gb),
+          borderColor: INK_MUTE,
+          borderDash: [3, 3],
           borderWidth: 1,
           pointRadius: 0,
           fill: false,
@@ -428,66 +443,47 @@ function renderResult(cfg, result) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { top: 8, right: 8, bottom: 4 } },
+      layout: { padding: { top: 6, right: 4, bottom: 0 } },
       interaction: { mode: "index", intersect: false },
       scales: {
-        x: {
-          title:  { display: true, text: "WORLD_SIZE", color: INK_MUTE, font: { size: 10, weight: "500" }, padding: { top: 6 } },
-          grid:   { color: RULE, lineWidth: 1, drawTicks: false },
-          ticks:  { color: INK_MUTE, font: { size: 10 }, padding: 6 },
-          border: { color: RULE },
-        },
-        y: {
-          beginAtZero: true,
-          title:  { display: true, text: "GB / GPU", color: INK_MUTE, font: { size: 10, weight: "500" } },
-          grid:   { color: RULE, lineWidth: 1, drawTicks: false },
-          ticks:  { color: INK_MUTE, font: { size: 10 }, padding: 6 },
-          border: { color: RULE },
-        },
+        x: { ...axisX, title: { display: true, text: "world size", color: INK_MUTE, font: { size: 12, family: '"Newsreader", serif', style: "italic" }, padding: { top: 8 } } },
+        y: { ...axisY, beginAtZero: true, title: { display: true, text: "GB per GPU", color: INK_MUTE, font: { size: 12, family: '"Newsreader", serif', style: "italic" } } },
       },
       plugins: {
-        tooltip: tooltipStyle((ctx) =>
-          `${ctx.dataset.label}  ${ctx.parsed.y.toFixed(2)} GB @ ${ctx.parsed.x} gpus`),
-        legend:  legendStyle({ position: "bottom" }),
+        tooltip: tooltipStyle((ctx) => `${ctx.parsed.y.toFixed(2)} GB at ${ctx.parsed.x} GPUs`),
+        legend:  {
+          display: true,
+          position: "bottom",
+          align: "start",
+          labels: {
+            color: INK_MUTE,
+            font: { family: '"Newsreader", serif', size: 12, style: "italic" },
+            boxWidth: 18,
+            boxHeight: 1,
+            padding: 14,
+            usePointStyle: false,
+          },
+        },
       },
     },
   });
 }
 
-const RULE_STRONG_FOR_AXIS = "#2e3a52";
-
-// Shared Chart.js style helpers
+// Shared Chart.js tooltip style — light cream card with terracotta title
 function tooltipStyle(labelFn) {
   return {
-    backgroundColor: "#050608",
-    titleColor: AMBER,
+    backgroundColor: PAPER,
+    titleColor: ACCENT,
     bodyColor: INK,
-    titleFont: { family: '"IBM Plex Mono", monospace', size: 10, weight: "600" },
-    bodyFont:  { family: '"IBM Plex Mono", monospace', size: 11 },
+    titleFont: { family: '"Newsreader", serif', size: 12, weight: "500", style: "italic" },
+    bodyFont:  { family: '"Newsreader", serif', size: 13 },
     titleAlign: "left",
-    borderColor: RULE_STRONG_FOR_AXIS,
+    borderColor: RULE,
     borderWidth: 1,
-    padding: 10,
+    padding: { top: 8, right: 12, bottom: 8, left: 12 },
     cornerRadius: 0,
-    displayColors: true,
-    boxWidth: 8,
-    boxHeight: 8,
+    displayColors: false,
     callbacks: { label: labelFn },
-  };
-}
-function legendStyle(extra = {}) {
-  return {
-    position: "bottom",
-    align: "start",
-    labels: {
-      color: INK_MUTE,
-      font: { family: '"IBM Plex Mono", monospace', size: 10, weight: "500" },
-      boxWidth: 10,
-      boxHeight: 10,
-      padding: 12,
-      usePointStyle: false,
-    },
-    ...extra,
   };
 }
 
@@ -501,26 +497,6 @@ function recompute() {
     console.error(e);
     $("error").textContent = "Estimation error: " + e.message;
   }
-}
-
-// ── Status bar clock + session tag ──
-function startStatusBar() {
-  const pad = (n) => String(n).padStart(2, "0");
-  const rev = $("sb-rev");
-  if (rev) {
-    // Stable per-session tag derived from time, gives the readout a "build id" feel.
-    const t = Date.now().toString(36).slice(-6).toUpperCase();
-    rev.textContent = "0x" + t;
-  }
-  const tick = () => {
-    const el = $("sb-clock");
-    if (!el) return;
-    const d = new Date();
-    el.textContent =
-      pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes()) + ":" + pad(d.getUTCSeconds());
-  };
-  tick();
-  setInterval(tick, 1000);
 }
 
 function init() {
@@ -561,7 +537,6 @@ function init() {
 
   syncPresetFields();
   syncStrategyFields();
-  startStatusBar();
   recompute();
 }
 

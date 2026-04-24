@@ -3,186 +3,114 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="Per-GPU memory estimator for PyTorch FSDP training." />
-  <title>FSDP·MEM·EST · per-gpu memory readout</title>
+  <meta name="description" content="A quiet per-GPU memory estimator for PyTorch FSDP training." />
+  <title>FSDP memory · estimator</title>
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=Major+Mono+Display&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Newsreader:ital,opsz,wght@0,6..72,300;0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&display=swap" rel="stylesheet" />
 
   <link rel="stylesheet" href="style.css" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
-  <!-- Background atmosphere -->
-  <div class="bg-grid" aria-hidden="true"></div>
-  <div class="bg-scanlines" aria-hidden="true"></div>
-  <div class="bg-vignette" aria-hidden="true"></div>
+  <main class="page">
 
-  <!-- ───────────── TOP STATUS BAR ───────────── -->
-  <div class="statusbar" aria-hidden="true">
-    <div class="sb-cluster">
-      <span class="sb-dot"></span>
-      <span class="sb-text">SYS · FSDP-MEM-EST</span>
-      <span class="sb-sep">/</span>
-      <span class="sb-text mute">v0.2.0</span>
-    </div>
-    <div class="sb-cluster center">
-      <span class="sb-text mute">REV</span>
-      <span class="sb-text" id="sb-rev">—</span>
-      <span class="sb-sep">/</span>
-      <span class="sb-text mute">UTC</span>
-      <span class="sb-text" id="sb-clock">--:--:--</span>
-    </div>
-    <div class="sb-cluster right">
-      <span class="sb-text status-ok">▮ LIVE</span>
-      <a class="sb-link" href="https://github.com/PopSoda2002/FSDP_memory_estimator" target="_blank" rel="noopener">SRC →</a>
-    </div>
-  </div>
+    <!-- ───────── Masthead ───────── -->
+    <header class="masthead">
+      <p class="kicker">Issue 01 · A small calculator for large models</p>
+      <h1 class="title">
+        How much <em>memory</em> does my<br/>
+        FSDP training run actually need<span class="acc-dot">?</span>
+      </h1>
+      <p class="lede">
+        A quiet, browser-based estimator for PyTorch&nbsp;FSDP&nbsp;/&nbsp;FSDP2 training.
+        Pick a model, set the sharding and precision, read the answer.
+        <a href="https://github.com/PopSoda2002/FSDP_memory_estimator" target="_blank" rel="noopener">Source on GitHub</a>.
+      </p>
+    </header>
 
-  <!-- ───────────── HERO ───────────── -->
-  <header class="hero">
-    <div class="hero-mark">
-      <span class="mark-id">[ 0.0.1 ]</span>
-      <span class="mark-tick">───────────</span>
-      <span class="mark-id">FACILITY · LOCAL</span>
-    </div>
-    <h1 class="hero-title">
-      <span class="ht-row">FSDP <em>memory</em></span>
-      <span class="ht-row ht-row--alt">estimator<span class="ht-dot">.</span></span>
-    </h1>
-    <p class="hero-sub">
-      Per-GPU peak <em>RAM</em> readout for PyTorch FSDP / FSDP2 training.
-      Sharding, mixed precision, activation checkpointing &mdash; modeled.
-      <span class="hero-meta">No backend. Open-source. <a href="https://github.com/PopSoda2002/FSDP_memory_estimator" target="_blank" rel="noopener">github →</a></span>
-    </p>
-  </header>
+    <!-- ───────── Body ───────── -->
+    <section class="body">
 
-  <!-- ───────────── MAIN GRID ───────────── -->
-  <main class="grid">
+      <!-- LEFT — controls -->
+      <aside class="controls">
 
-    <!-- ─── LEFT: CONFIG STACK ─── -->
-    <aside class="col-config">
-
-      <!-- 01 MODEL -->
-      <section class="module" data-mod="01">
-        <header class="mod-head">
-          <span class="mod-num">01</span>
-          <h2 class="mod-title">MODEL</h2>
-          <span class="mod-trail"></span>
-        </header>
-        <div class="mod-body">
+        <fieldset class="group">
+          <legend>Model</legend>
           <div class="row">
-            <label class="ldot" for="model-preset">preset<span class="dots"></span></label>
-            <select id="model-preset" class="cell wide"></select>
+            <label for="model-preset">preset</label>
+            <select id="model-preset" class="control wide"></select>
           </div>
-          <div id="custom-fields" class="custom-grid">
-            <div class="row">
-              <label class="ldot" for="hidden_size">hidden<span class="dots"></span></label>
-              <input id="hidden_size" class="cell num" type="number" min="64" step="64" value="4096" />
-            </div>
-            <div class="row">
-              <label class="ldot" for="intermediate_size">intermediate<span class="dots"></span></label>
-              <input id="intermediate_size" class="cell num" type="number" min="64" step="64" value="14336" />
-            </div>
-            <div class="row">
-              <label class="ldot" for="num_layers">layers<span class="dots"></span></label>
-              <input id="num_layers" class="cell num" type="number" min="1" value="32" />
-            </div>
-            <div class="row">
-              <label class="ldot" for="num_heads">heads<span class="dots"></span></label>
-              <input id="num_heads" class="cell num" type="number" min="1" value="32" />
-            </div>
-            <div class="row">
-              <label class="ldot" for="num_kv_heads">kv·heads<span class="dots"></span></label>
-              <input id="num_kv_heads" class="cell num" type="number" min="1" value="8" />
-            </div>
-            <div class="row">
-              <label class="ldot" for="vocab_size">vocab<span class="dots"></span></label>
-              <input id="vocab_size" class="cell num" type="number" min="1" value="128256" />
-            </div>
-            <div class="row toggle">
-              <label for="tie_embeddings" class="tgl">
-                <input id="tie_embeddings" type="checkbox" />
-                <span class="tgl-box"></span>
-                <span class="tgl-text">tie embeddings</span>
-              </label>
+          <div id="custom-fields" class="custom-fields">
+            <div class="row"><label for="hidden_size">hidden size</label>
+              <input id="hidden_size" class="control" type="number" min="64" step="64" value="4096"></div>
+            <div class="row"><label for="intermediate_size">intermediate</label>
+              <input id="intermediate_size" class="control" type="number" min="64" step="64" value="14336"></div>
+            <div class="row"><label for="num_layers">layers</label>
+              <input id="num_layers" class="control" type="number" min="1" value="32"></div>
+            <div class="row"><label for="num_heads">heads</label>
+              <input id="num_heads" class="control" type="number" min="1" value="32"></div>
+            <div class="row"><label for="num_kv_heads">kv heads</label>
+              <input id="num_kv_heads" class="control" type="number" min="1" value="8"></div>
+            <div class="row"><label for="vocab_size">vocab</label>
+              <input id="vocab_size" class="control" type="number" min="1" value="128256"></div>
+            <div class="row check">
+              <label class="chk"><input id="tie_embeddings" type="checkbox"><span></span>tie embeddings</label>
             </div>
           </div>
-        </div>
-      </section>
+        </fieldset>
 
-      <!-- 02 TRAINING -->
-      <section class="module" data-mod="02">
-        <header class="mod-head">
-          <span class="mod-num">02</span>
-          <h2 class="mod-title">TRAINING</h2>
-          <span class="mod-trail"></span>
-        </header>
-        <div class="mod-body">
+        <fieldset class="group">
+          <legend>Training</legend>
           <div class="row">
-            <label class="ldot" for="micro_batch">micro·batch<span class="dots"></span></label>
-            <input id="micro_batch" class="cell num" type="number" min="1" value="1" />
+            <label for="micro_batch">micro batch</label>
+            <input id="micro_batch" class="control" type="number" min="1" value="1">
           </div>
           <div class="row">
-            <label class="ldot" for="seq_len">seq·len<span class="dots"></span></label>
-            <input id="seq_len" class="cell num" type="number" min="128" step="128" value="4096" />
+            <label for="seq_len">seq len</label>
+            <input id="seq_len" class="control" type="number" min="128" step="128" value="4096">
           </div>
           <div class="row">
-            <label class="ldot" for="compute_dtype">compute·dtype<span class="dots"></span></label>
-            <select id="compute_dtype" class="cell">
+            <label for="compute_dtype">precision</label>
+            <select id="compute_dtype" class="control">
               <option value="bf16" selected>bf16</option>
               <option value="fp16">fp16</option>
               <option value="fp32">fp32</option>
             </select>
           </div>
           <div class="row">
-            <label class="ldot" for="optimizer">optimizer<span class="dots"></span></label>
-            <select id="optimizer" class="cell">
+            <label for="optimizer">optimizer</label>
+            <select id="optimizer" class="control">
               <option value="adamw" selected>AdamW</option>
               <option value="adam">Adam</option>
               <option value="sgd_momentum">SGD + momentum</option>
               <option value="sgd">SGD</option>
-              <option value="adam_8bit">Adam 8-bit (bnb)</option>
+              <option value="adam_8bit">Adam 8-bit</option>
             </select>
           </div>
           <div class="row">
-            <label class="ldot" for="act_ckpt">act·ckpt<span class="dots"></span></label>
-            <select id="act_ckpt" class="cell">
+            <label for="act_ckpt">checkpointing</label>
+            <select id="act_ckpt" class="control">
               <option value="none">none</option>
               <option value="selective" selected>selective</option>
               <option value="full">full</option>
             </select>
           </div>
-          <div class="row toggle">
-            <label for="flash_attn" class="tgl">
-              <input id="flash_attn" type="checkbox" checked />
-              <span class="tgl-box"></span>
-              <span class="tgl-text">FlashAttention</span>
-            </label>
+          <div class="row check">
+            <label class="chk"><input id="flash_attn" type="checkbox" checked><span></span>FlashAttention</label>
           </div>
-          <div class="row toggle">
-            <label for="ckpt_lm_head" class="tgl">
-              <input id="ckpt_lm_head" type="checkbox" />
-              <span class="tgl-box"></span>
-              <span class="tgl-text">checkpoint lm_head</span>
-            </label>
+          <div class="row check">
+            <label class="chk"><input id="ckpt_lm_head" type="checkbox"><span></span>checkpoint lm_head</label>
           </div>
-        </div>
-      </section>
+        </fieldset>
 
-      <!-- 03 FSDP & HARDWARE -->
-      <section class="module" data-mod="03">
-        <header class="mod-head">
-          <span class="mod-num">03</span>
-          <h2 class="mod-title">FSDP · HW</h2>
-          <span class="mod-trail"></span>
-        </header>
-        <div class="mod-body">
+        <fieldset class="group">
+          <legend>FSDP &amp; hardware</legend>
           <div class="row">
-            <label class="ldot" for="strategy">strategy<span class="dots"></span></label>
-            <select id="strategy" class="cell wide">
+            <label for="strategy">strategy</label>
+            <select id="strategy" class="control wide">
               <option value="FULL_SHARD" selected>FULL_SHARD · ZeRO-3</option>
               <option value="SHARD_GRAD_OP">SHARD_GRAD_OP · ZeRO-2</option>
               <option value="HYBRID_SHARD">HYBRID_SHARD</option>
@@ -190,137 +118,95 @@
             </select>
           </div>
           <div class="row">
-            <label class="ldot" for="world_size">world·size<span class="dots"></span></label>
-            <input id="world_size" class="cell num" type="number" min="1" value="8" />
+            <label for="world_size">GPUs</label>
+            <input id="world_size" class="control" type="number" min="1" value="8">
           </div>
           <div class="row" id="shard-size-row" style="display:none">
-            <label class="ldot" for="shard_size">shard·size<span class="dots"></span></label>
-            <input id="shard_size" class="cell num" type="number" min="1" value="8" />
+            <label for="shard_size">shard size</label>
+            <input id="shard_size" class="control" type="number" min="1" value="8">
           </div>
           <div class="row">
-            <label class="ldot" for="gpu">device<span class="dots"></span></label>
-            <select id="gpu" class="cell wide"></select>
+            <label for="gpu">device</label>
+            <select id="gpu" class="control wide"></select>
           </div>
-        </div>
-      </section>
-    </aside>
+        </fieldset>
+      </aside>
 
-    <!-- ─── RIGHT: TELEMETRY READOUT ─── -->
-    <section class="col-readout">
+      <!-- RIGHT — readout -->
+      <section class="readout">
 
-      <!-- KPI BANNER -->
-      <div class="kpi-banner" data-mod="OUT">
-        <div class="banner-axis">
-          <span class="ax-label">PEAK · RAM</span>
-          <span class="ax-tick"></span>
-        </div>
-
-        <div class="kpi kpi-primary">
-          <span class="kpi-tag">▮ PER-GPU PEAK</span>
-          <span class="kpi-readout" id="kpi-total">—</span>
-          <span class="kpi-unit">gigabytes</span>
-        </div>
-
-        <div class="kpi kpi-secondary">
-          <span class="kpi-tag">▯ PARAMS</span>
-          <span class="kpi-readout small" id="kpi-params">—</span>
-          <span class="kpi-unit">total weights</span>
+        <!-- Headline answer -->
+        <div class="headline">
+          <p class="overline">Per-GPU peak memory</p>
+          <p class="figure">
+            <span class="number" id="kpi-total">—</span>
+            <span class="unit">GB</span>
+          </p>
+          <p class="caption" id="caption">—</p>
+          <div class="fit-line" aria-hidden="true">
+            <div class="fit-line-fill" id="fit-bar"></div>
+            <div class="fit-line-marker"></div>
+          </div>
+          <p class="fit-text" id="kpi-fit">—</p>
         </div>
 
-        <div class="kpi kpi-fit-cell">
-          <span class="kpi-tag">▯ FIT</span>
-          <div class="fit-meter">
-            <div class="fit-meter-bar" id="fit-bar"></div>
-            <div class="fit-meter-ticks" aria-hidden="true">
-              <span></span><span></span><span></span><span></span><span></span>
-              <span></span><span></span><span></span><span></span><span></span>
+        <!-- Where the bytes go -->
+        <article class="section">
+          <header class="sec-head">
+            <h2>Where the bytes go</h2>
+            <p class="sec-sub">Each component, sized to its share of the per-GPU footprint.</p>
+          </header>
+
+          <div class="bar-wrap">
+            <div class="chart-box bar"><canvas id="chart-breakdown"></canvas></div>
+          </div>
+
+          <div class="duo">
+            <div class="duo-chart">
+              <div class="chart-box square"><canvas id="chart-pie"></canvas></div>
+            </div>
+            <div class="duo-table">
+              <table class="ledger">
+                <thead>
+                  <tr><th>component</th><th class="num">GB</th><th class="num">%</th></tr>
+                </thead>
+                <tbody id="component-table"></tbody>
+                <tfoot>
+                  <tr>
+                    <td>Total</td>
+                    <td class="num" id="ledger-total">—</td>
+                    <td class="num">100%</td>
+                  </tr>
+                </tfoot>
+              </table>
             </div>
           </div>
-          <span class="kpi-readout fit" id="kpi-fit">—</span>
-        </div>
-      </div>
+        </article>
 
-      <!-- BREAKDOWN BAR -->
-      <section class="module module-flush" data-mod="04">
-        <header class="mod-head">
-          <span class="mod-num">04</span>
-          <h2 class="mod-title">BREAKDOWN · STACKED</h2>
-          <span class="mod-trail"></span>
-        </header>
-        <div class="mod-body chart">
-          <div class="chart-box tall">
-            <canvas id="chart-breakdown"></canvas>
-          </div>
-        </div>
-      </section>
-
-      <div class="dual">
-        <!-- COMPOSITION DOUGHNUT -->
-        <section class="module module-flush" data-mod="05">
-          <header class="mod-head">
-            <span class="mod-num">05</span>
-            <h2 class="mod-title">COMPOSITION</h2>
-            <span class="mod-trail"></span>
+        <!-- Scaling -->
+        <article class="section">
+          <header class="sec-head">
+            <h2>Scaling with world size</h2>
+            <p class="sec-sub">Per-GPU peak as you add more workers, holding everything else equal.</p>
           </header>
-          <div class="mod-body chart">
-            <div class="chart-box square">
-              <canvas id="chart-pie"></canvas>
-            </div>
-          </div>
-        </section>
+          <div class="chart-box tall"><canvas id="chart-sweep"></canvas></div>
+        </article>
 
-        <!-- COMPONENT TABLE -->
-        <section class="module module-flush" data-mod="06">
-          <header class="mod-head">
-            <span class="mod-num">06</span>
-            <h2 class="mod-title">COMPONENTS · LEDGER</h2>
-            <span class="mod-trail"></span>
-          </header>
-          <div class="mod-body">
-            <table class="ledger">
-              <thead>
-                <tr>
-                  <th>component</th>
-                  <th class="num">size · GB</th>
-                  <th class="num">% peak</th>
-                </tr>
-              </thead>
-              <tbody id="component-table"></tbody>
-            </table>
-          </div>
-        </section>
-      </div>
-
-      <!-- SWEEP -->
-      <section class="module module-flush" data-mod="07">
-        <header class="mod-head">
-          <span class="mod-num">07</span>
-          <h2 class="mod-title">SCALING · WORLD_SIZE SWEEP</h2>
-          <span class="mod-trail"></span>
-        </header>
-        <div class="mod-body chart">
-          <div class="chart-box tall">
-            <canvas id="chart-sweep"></canvas>
-          </div>
-        </div>
+        <p class="error" id="error"></p>
       </section>
-
-      <p class="error" id="error"></p>
     </section>
-  </main>
 
-  <!-- ───────────── FOOTER ───────────── -->
-  <footer class="footer">
-    <div class="ft-rule"></div>
-    <div class="ft-row">
-      <span class="ft-cell">EST &middot; <span class="amber">±15%</span> of measured peak</span>
-      <span class="ft-cell">FORMULAS &middot; see <code>script.js</code></span>
-      <span class="ft-cell">INSP &middot; <a href="https://huggingface.co/spaces/ISEEKYAN/megatron_memory_estimator" target="_blank" rel="noopener">megatron_memory_estimator</a></span>
-    </div>
-    <div class="ft-mark">
-      <span>━━━━━━━━━━ END · TRANSMISSION ━━━━━━━━━━</span>
-    </div>
-  </footer>
+    <!-- ───────── Footer ───────── -->
+    <footer class="colophon">
+      <hr/>
+      <p>
+        An estimator, not a profiler &mdash; treat numbers as a budgeting tool, typically within
+        <span class="acc">±15%</span> of measured peak. Formulas live in
+        <a href="https://github.com/PopSoda2002/FSDP_memory_estimator/blob/master/script.js" target="_blank" rel="noopener">script.js</a>.
+        Inspired by <a href="https://huggingface.co/spaces/ISEEKYAN/megatron_memory_estimator" target="_blank" rel="noopener">megatron_memory_estimator</a>.
+      </p>
+    </footer>
+  </main>
 
   <script src="presets.js"></script>
   <script src="script.js"></script>
