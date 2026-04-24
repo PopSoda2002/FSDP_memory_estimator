@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FSDP Memory Estimator</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>FSDP Memory Estimator</h1>
+      <p class="tagline">Estimate per-GPU memory for PyTorch FSDP training. No backend required.</p>
+    </div>
+    <a class="github-link" href="https://github.com/PopSoda2002/FSDP_memory_estimator" target="_blank" rel="noopener">GitHub</a>
+  </header>
+
+  <main class="layout">
+
+    <!-- ───────── Config column ───────── -->
+    <section class="panel config">
+      <div class="card">
+        <h2>Model</h2>
+        <div class="field">
+          <label for="model-preset">Preset</label>
+          <select id="model-preset"></select>
+        </div>
+        <div id="custom-fields" class="grid-2">
+          <div class="field">
+            <label for="hidden_size">hidden_size</label>
+            <input id="hidden_size" type="number" min="64" step="64" value="4096" />
+          </div>
+          <div class="field">
+            <label for="intermediate_size">intermediate_size</label>
+            <input id="intermediate_size" type="number" min="64" step="64" value="14336" />
+          </div>
+          <div class="field">
+            <label for="num_layers">num_layers</label>
+            <input id="num_layers" type="number" min="1" value="32" />
+          </div>
+          <div class="field">
+            <label for="num_heads">num_heads</label>
+            <input id="num_heads" type="number" min="1" value="32" />
+          </div>
+          <div class="field">
+            <label for="num_kv_heads">num_kv_heads</label>
+            <input id="num_kv_heads" type="number" min="1" value="8" />
+          </div>
+          <div class="field">
+            <label for="vocab_size">vocab_size</label>
+            <input id="vocab_size" type="number" min="1" value="128256" />
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input id="tie_embeddings" type="checkbox" />
+              tie embeddings
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Training</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label for="micro_batch">micro_batch</label>
+            <input id="micro_batch" type="number" min="1" value="1" />
+          </div>
+          <div class="field">
+            <label for="seq_len">seq_len</label>
+            <input id="seq_len" type="number" min="128" step="128" value="4096" />
+          </div>
+          <div class="field">
+            <label for="compute_dtype">compute dtype</label>
+            <select id="compute_dtype">
+              <option value="bf16" selected>bf16</option>
+              <option value="fp16">fp16</option>
+              <option value="fp32">fp32</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="optimizer">optimizer</label>
+            <select id="optimizer">
+              <option value="adamw" selected>AdamW</option>
+              <option value="adam">Adam</option>
+              <option value="sgd_momentum">SGD + momentum</option>
+              <option value="sgd">SGD</option>
+              <option value="adam_8bit">Adam 8-bit (bnb)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="act_ckpt">activation checkpointing</label>
+            <select id="act_ckpt">
+              <option value="none">none</option>
+              <option value="selective" selected>selective</option>
+              <option value="full">full</option>
+            </select>
+          </div>
+          <div class="field checkbox">
+            <label>
+              <input id="flash_attn" type="checkbox" checked />
+              FlashAttention
+            </label>
+            <label>
+              <input id="ckpt_lm_head" type="checkbox" />
+              checkpoint lm_head
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>FSDP &amp; Hardware</h2>
+        <div class="grid-2">
+          <div class="field">
+            <label for="strategy">sharding strategy</label>
+            <select id="strategy">
+              <option value="FULL_SHARD" selected>FULL_SHARD (ZeRO-3)</option>
+              <option value="SHARD_GRAD_OP">SHARD_GRAD_OP (ZeRO-2)</option>
+              <option value="HYBRID_SHARD">HYBRID_SHARD</option>
+              <option value="NO_SHARD">NO_SHARD (DDP)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="world_size">world_size (GPUs)</label>
+            <input id="world_size" type="number" min="1" value="8" />
+          </div>
+          <div class="field" id="shard-size-row" style="display:none">
+            <label for="shard_size">shard_size (per replica)</label>
+            <input id="shard_size" type="number" min="1" value="8" />
+          </div>
+          <div class="field">
+            <label for="gpu">GPU type</label>
+            <select id="gpu"></select>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────── Results column ───────── -->
+    <section class="panel results">
+      <div class="kpis">
+        <div class="kpi">
+          <span class="kpi-label">Parameters</span>
+          <span class="kpi-value" id="kpi-params">—</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">Per-GPU peak</span>
+          <span class="kpi-value" id="kpi-total">—</span>
+        </div>
+        <div class="kpi">
+          <span class="kpi-label">Fit</span>
+          <span class="kpi-fit" id="kpi-fit">—</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Memory breakdown</h2>
+        <div class="chart-box tall">
+          <canvas id="chart-breakdown"></canvas>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2>Composition</h2>
+          <div class="chart-box">
+            <canvas id="chart-pie"></canvas>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Components</h2>
+          <table class="components">
+            <thead>
+              <tr><th>Component</th><th class="num">GB</th><th class="num">%</th></tr>
+            </thead>
+            <tbody id="component-table"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Sweep over world_size</h2>
+        <div class="chart-box tall">
+          <canvas id="chart-sweep"></canvas>
+        </div>
+      </div>
+
+      <p class="error" id="error"></p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Estimator only — see README for caveats. Inspired by
+      <a href="https://huggingface.co/spaces/ISEEKYAN/megatron_memory_estimator" target="_blank" rel="noopener">megatron_memory_estimator</a>.
+    </p>
+  </footer>
+
+  <script src="presets.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
