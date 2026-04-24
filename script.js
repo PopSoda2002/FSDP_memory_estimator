@@ -347,8 +347,7 @@ function renderResult(cfg, result) {
   };
 
   // ── Slim horizontal stacked bar (single row, no legend, no axes) ──
-  if (breakdownChart) breakdownChart.destroy();
-  breakdownChart = new Chart($("chart-breakdown"), {
+  breakdownChart = safeChart(breakdownChart, $("chart-breakdown"), {
     type: "bar",
     data: {
       labels: [""],
@@ -380,8 +379,7 @@ function renderResult(cfg, result) {
   });
 
   // ── Doughnut, monochrome-ish ──
-  if (pieChart) pieChart.destroy();
-  pieChart = new Chart($("chart-pie"), {
+  pieChart = safeChart(pieChart, $("chart-pie"), {
     type: "doughnut",
     data: {
       labels,
@@ -407,10 +405,12 @@ function renderResult(cfg, result) {
 
   // ── Sweep curve — single thin terracotta line, dashed reference ──
   const sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
-  const sweepData = sizes.map(N => estimate({ ...cfg, world_size: N }).total / GB);
+  const sweepData = sizes.map(N => {
+    try { return estimate({ ...cfg, world_size: N }).total / GB; }
+    catch (_) { return null; } // tolerate transient errors so sweep still draws
+  });
 
-  if (sweepChart) sweepChart.destroy();
-  sweepChart = new Chart($("chart-sweep"), {
+  sweepChart = safeChart(sweepChart, $("chart-sweep"), {
     type: "line",
     data: {
       labels: sizes,
@@ -458,8 +458,8 @@ function renderResult(cfg, result) {
           labels: {
             color: INK_MUTE,
             font: { family: '"Newsreader", serif', size: 12, style: "italic" },
-            boxWidth: 18,
-            boxHeight: 1,
+            boxWidth: 16,
+            boxHeight: 8,
             padding: 14,
             usePointStyle: false,
           },
@@ -467,6 +467,24 @@ function renderResult(cfg, result) {
       },
     },
   });
+}
+
+// Construct a Chart.js chart on `canvas`, replacing `prev` if present.
+// Failures in one chart never kill subsequent charts. Errors surface in the
+// page-level error region so users notice without opening DevTools.
+function safeChart(prev, canvas, config) {
+  try {
+    if (prev) prev.destroy();
+  } catch (e) { console.warn("Chart destroy failed:", e); }
+  if (!canvas) return null;
+  try {
+    return new Chart(canvas, config);
+  } catch (e) {
+    console.error("Chart creation failed for", canvas.id, e);
+    const errEl = document.getElementById("error");
+    if (errEl) errEl.textContent = `Chart "${canvas.id}" failed to render: ${e.message}`;
+    return null;
+  }
 }
 
 // Shared Chart.js tooltip style — light cream card with terracotta title
