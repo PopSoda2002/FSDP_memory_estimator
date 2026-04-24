@@ -482,6 +482,54 @@ table.ledger tfoot td {
 .colophon p { margin: 0 auto; max-width: 60ch; line-height: 1.55; }
 .acc { color: var(--accent); font-style: normal; font-weight: 500; }
 
+/* ─────────────────── CALCULATION DETAILS ─────────────────── */
+details#calc-details summary {
+  cursor: pointer;
+  list-style: none;
+}
+details#calc-details summary::-webkit-details-marker { display: none; }
+details#calc-details summary.sec-head { margin-bottom: 0; }
+details#calc-details[open] summary.sec-head { margin-bottom: 24px; }
+details#calc-details summary h2::after {
+  content: ' \25B8';
+  font-size: 14px;
+  color: var(--ink-faint);
+  transition: transform 200ms;
+}
+details#calc-details[open] summary h2::after {
+  content: ' \25BE';
+}
+#calc-details-body {
+  margin-top: 8px;
+}
+.detail-section {
+  margin-bottom: 20px;
+}
+.detail-section:last-child { margin-bottom: 0; }
+.detail-section h3 {
+  font-family: var(--display);
+  font-weight: 500;
+  font-variation-settings: "opsz" 14;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 8px;
+}
+pre.calc {
+  margin: 0;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink);
+  background: var(--paper-deep);
+  padding: 14px 16px;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
 /* ─────────────────── ERROR ─────────────────── */
 .error {
   color: var(--critical);
