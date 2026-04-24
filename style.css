@@ -219,6 +219,21 @@ select.control {
   padding-right: 16px;
   cursor: pointer;
 }
+
+/* Native optgroup labels — styled per-OS, but we can hint at typography. */
+select.control optgroup {
+  font-family: var(--display);
+  font-style: italic;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--paper);
+}
+select.control option {
+  font-family: var(--serif);
+  font-style: normal;
+  color: var(--ink-strong);
+  background: var(--paper);
+}
 input[type="number"]::-webkit-inner-spin-button,
 input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 input[type="number"] { -moz-appearance: textfield; }

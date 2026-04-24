@@ -500,12 +500,24 @@ function recompute() {
 }
 
 function init() {
-  // Populate model preset dropdown
+  // Populate model preset dropdown, grouped by family.
   const sel = $("model-preset");
-  for (const name of Object.keys(window.MODEL_PRESETS)) {
-    const opt = document.createElement("option");
-    opt.value = name; opt.textContent = name;
-    sel.appendChild(opt);
+  const byFamily = {};
+  for (const [name, m] of Object.entries(window.MODEL_PRESETS)) {
+    const f = m.family || "Other";
+    (byFamily[f] = byFamily[f] || []).push(name);
+  }
+  const familyOrder = window.MODEL_FAMILY_ORDER || Object.keys(byFamily).sort();
+  for (const fam of familyOrder) {
+    if (!byFamily[fam] || !byFamily[fam].length) continue;
+    const og = document.createElement("optgroup");
+    og.label = fam;
+    for (const name of byFamily[fam]) {
+      const opt = document.createElement("option");
+      opt.value = name; opt.textContent = name;
+      og.appendChild(opt);
+    }
+    sel.appendChild(og);
   }
   const customOpt = document.createElement("option");
   customOpt.value = "custom"; customOpt.textContent = "Custom…";
