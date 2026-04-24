@@ -38,7 +38,8 @@ function countParams(m) {
   const final_norm = h;
 
   const total = L * per_layer + embed + lm_head + final_norm;
-  return { total, per_layer, embed, lm_head };
+  return { total, per_layer, embed, lm_head, final_norm, attn, mlp, norms,
+           q_proj, k_proj, v_proj, o_proj, head_dim, num_q, num_kv };
 }
 
 // ---------------------------------------------------------------------------
@@ -113,13 +114,10 @@ function estimate(cfg) {
   // Per-layer activation memory (Korthikanti et al. 2022, no TP, no SP).
   //   sbh × 2 bytes per saved tensor, ~17 saved tensors per block ⇒ sbh·34 (for bf16)
   // Plus attention scores (s²·b·a·2) — skipped when FlashAttention is on.
-  let act_per_layer = s * b * h * 17 * act_dtype_bytes / 2; // 17 sbh in fp16/bf16 ≈ sbh·34
-  // intermediate-state for the MLP up/gate (i is often ~4h, but be precise)
-  act_per_layer += s * b * i * 2 * act_dtype_bytes; // up + gate activations
-
-  if (!cfg.flash_attn) {
-    act_per_layer += s * s * b * a * act_dtype_bytes; // attention scores
-  }
+  const act_base = s * b * h * 17 * act_dtype_bytes / 2; // 17 sbh in fp16/bf16 ≈ sbh·34
+  const act_mlp  = s * b * i * 2 * act_dtype_bytes;      // up + gate activations
+  const act_attn = cfg.flash_attn ? 0 : s * s * b * a * act_dtype_bytes; // attention scores
+  const act_per_layer = act_base + act_mlp + act_attn;
 
   let act_mem = 0;
   if (cfg.act_ckpt === "none") {
@@ -143,10 +141,12 @@ function estimate(cfg) {
   let head_act_mem = logits_mem + loss_mem;
   if (cfg.ckpt_lm_head) head_act_mem = logits_mem; // saved logits only
 
+  const act_mem_layers = act_mem;
   act_mem += head_act_mem;
 
   // Embedding activations (s·b·h, small)
-  act_mem += s * b * h * act_dtype_bytes;
+  const embed_act = s * b * h * act_dtype_bytes;
+  act_mem += embed_act;
 
   // ---------------- Framework / misc ----------------
   // PyTorch + CUDA context, NCCL buffers, cuDNN workspace, allocator fragmentation.
@@ -167,6 +167,16 @@ function estimate(cfg) {
       "Framework":        overhead,
     },
     total,
+    _detail: {
+      counts, compute_bytes, grad_bytes_lp, master_bytes, optim_bytes,
+      shard_param, shard_grad, shard_optim,
+      params_mem, grads_mem, master_mem, optim_mem,
+      block_params, comm_mem,
+      s, b, h, a, L, i, v, act_dtype_bytes,
+      act_base, act_mlp, act_attn, act_per_layer,
+      act_mem_layers, logits_mem, loss_mem, head_act_mem, embed_act,
+      overhead,
+    },
   };
 }
 
@@ -176,6 +186,7 @@ function estimate(cfg) {
 
 const $  = (id) => document.getElementById(id);
 const fmtGB = (bytes) => (bytes / GB).toFixed(2);
+const fmtInt = (n) => Math.round(n).toLocaleString();
 const fmtParams = (n) => {
   if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
   if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
@@ -467,6 +478,238 @@ function renderResult(cfg, result) {
       },
     },
   });
+
+  renderDetails(cfg, result);
+}
+
+// ---------------------------------------------------------------------------
+// Detailed calculation breakdown (collapsible)
+// ---------------------------------------------------------------------------
+
+function renderDetails(cfg, result) {
+  const d = result._detail;
+  const c = d.counts;
+  const m = cfg.model;
+
+  const sections = [];
+
+  // 1. Notation
+  sections.push({
+    title: 'Notation',
+    calc: [
+      `P  \u2014 total number of model parameters (computed below)`,
+      `N  \u2014 world_size, number of GPUs              = ${cfg.world_size}`,
+      `h  \u2014 hidden_size, model hidden dimension     = ${fmtInt(m.hidden_size)}`,
+      `i  \u2014 intermediate_size, MLP hidden dimension  = ${fmtInt(m.intermediate_size)}`,
+      `L  \u2014 num_layers, number of transformer layers = ${m.num_layers}`,
+      `a  \u2014 num_heads, number of attention heads     = ${m.num_heads}`,
+      `s  \u2014 seq_len, sequence length                 = ${fmtInt(cfg.seq_len)}`,
+      `b  \u2014 micro_batch, per-GPU batch size          = ${cfg.micro_batch}`,
+      `V  \u2014 vocab_size                               = ${fmtInt(m.vocab_size)}`,
+      ``,
+      `compute_dtype = ${cfg.compute_dtype} \u2192 ${d.compute_bytes} bytes per element`,
+    ].join('\n'),
+  });
+
+  // 2. Parameter Count
+  sections.push({
+    title: 'Parameter count (P)',
+    calc: [
+      `head_dim = h / a = ${m.hidden_size} / ${c.num_q} = ${c.head_dim}`,
+      `num_kv_heads = ${c.num_kv}  (for GQA/MQA; equals a if standard MHA)`,
+      ``,
+      `Attention (per layer):`,
+      `  q_proj = h * a * head_dim           = ${m.hidden_size} * ${c.num_q} * ${c.head_dim} = ${fmtInt(c.q_proj)}`,
+      `  k_proj = h * num_kv_heads * head_dim = ${m.hidden_size} * ${c.num_kv} * ${c.head_dim} = ${fmtInt(c.k_proj)}`,
+      `  v_proj = h * num_kv_heads * head_dim = ${m.hidden_size} * ${c.num_kv} * ${c.head_dim} = ${fmtInt(c.v_proj)}`,
+      `  o_proj = a * head_dim * h           = ${c.num_q} * ${c.head_dim} * ${m.hidden_size} = ${fmtInt(c.o_proj)}`,
+      `  attn   = q + k + v + o = ${fmtInt(c.attn)}`,
+      ``,
+      `MLP \u2014 SwiGLU (per layer):`,
+      `  gate + up = 2 * h * i = 2 * ${m.hidden_size} * ${fmtInt(m.intermediate_size)} = ${fmtInt(2 * m.hidden_size * m.intermediate_size)}`,
+      `  down     = i * h = ${fmtInt(m.intermediate_size)} * ${m.hidden_size} = ${fmtInt(m.intermediate_size * m.hidden_size)}`,
+      `  mlp      = ${fmtInt(c.mlp)}`,
+      ``,
+      `RMSNorm (per layer): 2 * h = 2 * ${m.hidden_size} = ${fmtInt(c.norms)}`,
+      `Per-layer total = attn + mlp + norms = ${fmtInt(c.per_layer)}`,
+      ``,
+      `Embedding  = V * h = ${fmtInt(d.v)} * ${m.hidden_size} = ${fmtInt(c.embed)}`,
+      m.tie_embeddings
+        ? `LM head    = 0 (tied with embedding)`
+        : `LM head    = V * h = ${fmtInt(d.v)} * ${m.hidden_size} = ${fmtInt(c.lm_head)}`,
+      `Final norm = h = ${m.hidden_size}`,
+      ``,
+      `P = L * per_layer + embedding + lm_head + final_norm`,
+      `  = ${d.L} * ${fmtInt(c.per_layer)} + ${fmtInt(c.embed)} + ${fmtInt(c.lm_head)} + ${c.final_norm}`,
+      `  = ${fmtInt(result.P)}  (${fmtParams(result.P)})`,
+    ].join('\n'),
+  });
+
+  // 3. Model states (sharding + params + grads + optimizer)
+  const stratDesc = {
+    FULL_SHARD:    'FULL_SHARD (ZeRO-3) \u2014 params, grads, optim all sharded across N GPUs',
+    SHARD_GRAD_OP: 'SHARD_GRAD_OP (ZeRO-2) \u2014 params replicated; grads + optim sharded',
+    HYBRID_SHARD:  `HYBRID_SHARD \u2014 all sharded within shard_size=${cfg.shard_size || 8}, replicated across replicas`,
+    NO_SHARD:      'NO_SHARD (DDP) \u2014 everything replicated on each GPU',
+  };
+  const optimDesc = {
+    adamw:        'AdamW \u2014 1st moment (m) + 2nd moment (v), each fp32 \u2192 8 bytes/param',
+    adam:         'Adam \u2014 1st moment (m) + 2nd moment (v), each fp32 \u2192 8 bytes/param',
+    sgd_momentum: 'SGD + momentum buffer \u2192 4 bytes/param',
+    sgd:          'SGD (vanilla, no state) \u2192 0 bytes/param',
+    adam_8bit:    'Adam 8-bit (bnb quantised m+v) \u2192 2 bytes/param',
+  };
+  const masterLines = cfg.compute_dtype === 'fp32'
+    ? [`  compute_dtype = fp32 \u2192 no master copy needed \u2192 0 bytes`]
+    : [
+        `  master_mem = 4 bytes * P / shard_optim`,
+        `             = 4 * ${fmtInt(result.P)} / ${d.shard_optim}`,
+        `             = ${fmtInt(d.master_mem)} bytes  =  ${fmtGB(d.master_mem)} GB`,
+      ];
+  sections.push({
+    title: 'Model states (params + grads + optimizer)',
+    calc: [
+      `--- Sharding strategy ---`,
+      `${stratDesc[cfg.strategy]}`,
+      `N (world_size) = ${cfg.world_size}`,
+      `shard_param = ${d.shard_param}    shard_grad = ${d.shard_grad}    shard_optim = ${d.shard_optim}`,
+      `  (divisor: per-GPU memory = total / shard_factor)`,
+      ``,
+      `--- Parameters (model weights stored in ${cfg.compute_dtype}) ---`,
+      `params_mem = compute_bytes * P / shard_param`,
+      `           = ${d.compute_bytes} * ${fmtInt(result.P)} / ${d.shard_param}`,
+      `           = ${fmtInt(d.params_mem)} bytes  =  ${fmtGB(d.params_mem)} GB`,
+      ``,
+      `--- Gradients (stored in ${cfg.compute_dtype}, cast to fp32 during reduce-scatter) ---`,
+      `grads_mem = grad_bytes * P / shard_grad`,
+      `          = ${d.grad_bytes_lp} * ${fmtInt(result.P)} / ${d.shard_grad}`,
+      `          = ${fmtInt(d.grads_mem)} bytes  =  ${fmtGB(d.grads_mem)} GB`,
+      ``,
+      `--- Optimizer states ---`,
+      `Optimizer: ${optimDesc[cfg.optimizer]}`,
+      ``,
+      `Master weights (fp32 copy, needed when compute_dtype != fp32):`,
+      ...masterLines,
+      ``,
+      `Optimizer state buffers (${d.optim_bytes} bytes per param):`,
+      `  optim_mem = ${d.optim_bytes} * P / shard_optim`,
+      `            = ${d.optim_bytes} * ${fmtInt(result.P)} / ${d.shard_optim}`,
+      `            = ${fmtInt(d.optim_mem)} bytes  =  ${fmtGB(d.optim_mem)} GB`,
+      ``,
+      `Optimizer total = master_mem + optim_mem = ${fmtGB(d.master_mem)} + ${fmtGB(d.optim_mem)} = ${fmtGB(d.master_mem + d.optim_mem)} GB`,
+    ].join('\n'),
+  });
+
+  // 4. Activations
+  const actLines = [
+    `Per-layer activation breakdown (stored in ${cfg.compute_dtype}, ${d.act_dtype_bytes} bytes):`,
+    ``,
+    `  Saved tensors (intermediate outputs kept for backward pass):`,
+    `    = s*b*h * 17 * dtype_bytes / 2`,
+    `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.h)} * 17 * ${d.act_dtype_bytes} / 2`,
+    `    = ${fmtInt(d.act_base)} bytes`,
+    ``,
+    `  MLP intermediates (gate + up projection outputs):`,
+    `    = s*b*i * 2 * dtype_bytes`,
+    `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.i)} * 2 * ${d.act_dtype_bytes}`,
+    `    = ${fmtInt(d.act_mlp)} bytes`,
+    ``,
+  ];
+  if (!cfg.flash_attn) {
+    actLines.push(
+      `  Attention score matrix (s*s per head, materialised without FlashAttention):`,
+      `    = s*s*b*a * dtype_bytes`,
+      `    = ${fmtInt(d.s)} * ${fmtInt(d.s)} * ${d.b} * ${d.a} * ${d.act_dtype_bytes}`,
+      `    = ${fmtInt(d.act_attn)} bytes`,
+      ``,
+    );
+  } else {
+    actLines.push(`  Attention scores = 0  (FlashAttention avoids materialising the s*s matrix)`, ``);
+  }
+  actLines.push(`act_per_layer = saved_tensors + mlp + attn_scores = ${fmtInt(d.act_per_layer)} bytes  =  ${fmtGB(d.act_per_layer)} GB`, ``);
+
+  const ckptLabels = {
+    none:      'None \u2014 all L layers\u2019 activations kept in memory',
+    selective: 'Selective \u2014 drops attention intermediates, keeps ~60% of full',
+    full:      'Full \u2014 only residual inputs retained; recompute 1 layer at a time during backward',
+  };
+  actLines.push(`Activation checkpointing: ${ckptLabels[cfg.act_ckpt]}`);
+  if (cfg.act_ckpt === 'none') {
+    actLines.push(`  layers_act = L * act_per_layer = ${d.L} * ${fmtInt(d.act_per_layer)} = ${fmtInt(d.act_mem_layers)} bytes`);
+  } else if (cfg.act_ckpt === 'selective') {
+    actLines.push(`  layers_act = L * act_per_layer * 0.6 = ${d.L} * ${fmtInt(d.act_per_layer)} * 0.6 = ${fmtInt(d.act_mem_layers)} bytes`);
+  } else {
+    actLines.push(
+      `  layers_act = L * (s*b*h*dtype) [residual inputs] + act_per_layer [1 recomputed layer]`,
+      `             = ${d.L} * ${fmtInt(d.s * d.b * d.h * d.act_dtype_bytes)} + ${fmtInt(d.act_per_layer)}`,
+      `             = ${fmtInt(d.act_mem_layers)} bytes`,
+    );
+  }
+  actLines.push(
+    ``,
+    `LM head activations (logits tensor is large when V is big):`,
+    `  logits = s*b*V * dtype = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.v)} * ${d.act_dtype_bytes} = ${fmtInt(d.logits_mem)} bytes`,
+    `  loss   = s*b*V * 4 (kept in fp32 for numerical stability) = ${fmtInt(d.loss_mem)} bytes`,
+  );
+  if (cfg.ckpt_lm_head) {
+    actLines.push(`  lm_head checkpointed \u2192 head_act = logits only = ${fmtInt(d.head_act_mem)} bytes`);
+  } else {
+    actLines.push(`  head_act = logits + loss = ${fmtInt(d.head_act_mem)} bytes`);
+  }
+  actLines.push(
+    ``,
+    `Embedding output: s*b*h * dtype = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.h)} * ${d.act_dtype_bytes} = ${fmtInt(d.embed_act)} bytes`,
+    ``,
+    `Total activations = layers_act + head_act + embedding`,
+    `  = ${fmtInt(d.act_mem_layers)} + ${fmtInt(d.head_act_mem)} + ${fmtInt(d.embed_act)}`,
+    `  = ${fmtInt(d.act_mem_layers + d.head_act_mem + d.embed_act)} bytes  =  ${fmtGB(d.act_mem_layers + d.head_act_mem + d.embed_act)} GB`,
+  );
+  sections.push({ title: 'Activations', calc: actLines.join('\n') });
+
+  // 5. Communication buffers & framework overhead
+  const miscLines = [];
+  if (cfg.strategy === 'NO_SHARD') {
+    miscLines.push(`Communication buffers:`, `  Strategy = NO_SHARD (DDP) \u2192 no all-gather of parameters needed`, `  comm_mem = 0`);
+  } else {
+    miscLines.push(
+      `Communication buffers (all-gather for FSDP parameter reconstruction):`,
+      `  FSDP reconstructs weights one transformer block at a time.`,
+      `  Peak = 2 blocks in memory (current block + next block being prefetched).`,
+      `  block_params (params per layer) = ${fmtInt(d.block_params)}`,
+      `  comm_mem = compute_bytes * block_params * 2`,
+      `           = ${d.compute_bytes} * ${fmtInt(d.block_params)} * 2`,
+      `           = ${fmtInt(d.comm_mem)} bytes  =  ${fmtGB(d.comm_mem)} GB`,
+    );
+  }
+  miscLines.push(
+    ``,
+    `Framework overhead (fixed estimate):`,
+    `  CUDA context + NCCL buffers + cuDNN workspace + allocator fragmentation`,
+    `  = 1.50 GB (baseline) + 0.50 GB (workspace) = 2.00 GB`,
+  );
+  sections.push({ title: 'Communication & framework overhead', calc: miscLines.join('\n') });
+
+  // 6. Total
+  const comp = result.components;
+  sections.push({
+    title: 'Total per-GPU peak memory',
+    calc: [
+      `Parameters (weights)   ${fmtGB(comp['Parameters']).padStart(8)} GB`,
+      `Gradients              ${fmtGB(comp['Gradients']).padStart(8)} GB`,
+      `Optimizer states       ${fmtGB(comp['Optimizer states']).padStart(8)} GB`,
+      `Activations            ${fmtGB(comp['Activations']).padStart(8)} GB`,
+      `Comm buffers           ${fmtGB(comp['Comm buffers']).padStart(8)} GB`,
+      `Framework overhead     ${fmtGB(comp['Framework']).padStart(8)} GB`,
+      `${'─'.repeat(32)}`,
+      `Total                  ${fmtGB(result.total).padStart(8)} GB`,
+    ].join('\n'),
+  });
+
+  let html = '';
+  for (const sec of sections) {
+    html += `<div class="detail-section"><h3>${sec.title}</h3><pre class="calc">${sec.calc}</pre></div>`;
+  }
+  $("calc-details-body").innerHTML = html;
 }
 
 // Construct a Chart.js chart on `canvas`, replacing `prev` if present.
