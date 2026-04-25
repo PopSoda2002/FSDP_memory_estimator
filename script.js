@@ -355,73 +355,48 @@ function renderResult(cfg, result) {
   const data   = ordered.map(([, v]) => v / GB);
   const colors = labels.map(l => COLORS[l]);
 
-  const axisX = {
-    grid:   { color: RULE_SOFT, drawTicks: false },
-    ticks:  { color: INK_MUTE, font: { size: 11, family: '"Newsreader", serif', style: "italic" }, padding: 6 },
-    border: { color: RULE },
-  };
-  const axisY = {
-    grid:   { color: RULE_SOFT, drawTicks: false },
-    ticks:  { color: INK_MUTE, font: { size: 11, family: '"Newsreader", serif', style: "italic" }, padding: 8 },
-    border: { color: RULE },
-  };
-
   // ── Slim horizontal stacked bar (single row, no legend, no axes) ──
-  breakdownChart = safeChart(breakdownChart, $("chart-breakdown"), {
-    type: "bar",
-    data: {
-      labels: [""],
-      datasets: labels.map((l, idx) => ({
-        label: l,
-        data: [data[idx]],
-        backgroundColor: colors[idx],
-        borderColor: PAPER,
-        borderWidth: 1,
-        borderSkipped: false,
-        barPercentage: 1,
-        categoryPercentage: 1,
-      })),
-    },
-    options: {
-      indexAxis: "y",
-      responsive: true,
-      maintainAspectRatio: false,
-      layout: { padding: 0 },
-      scales: {
-        x: { stacked: true, display: false, grid: { display: false } },
-        y: { stacked: true, display: false, grid: { display: false } },
-      },
-      plugins: {
-        tooltip: tooltipStyle((ctx) => `${ctx.dataset.label} — ${ctx.parsed.x.toFixed(2)} GB`),
-        legend:  { display: false },
-      },
-    },
-  });
+  const breakdownDatasets = labels.map((l, idx) => ({
+    label: l,
+    data: [data[idx]],
+    backgroundColor: colors[idx],
+    borderColor: PAPER,
+    borderWidth: 1,
+    borderSkipped: false,
+    barPercentage: 1,
+    categoryPercentage: 1,
+  }));
+  if (breakdownChart) {
+    breakdownChart.data.datasets = breakdownDatasets;
+    breakdownChart.update("none");
+  } else {
+    breakdownChart = safeChart(null, $("chart-breakdown"), {
+      type: "bar",
+      data: { labels: [""], datasets: breakdownDatasets },
+      options: BREAKDOWN_OPTIONS,
+    });
+  }
 
   // ── Doughnut, monochrome-ish ──
-  pieChart = safeChart(pieChart, $("chart-pie"), {
-    type: "doughnut",
-    data: {
-      labels,
-      datasets: [{
-        data,
-        backgroundColor: colors,
-        borderColor: PAPER,
-        borderWidth: 2,
-        hoverBorderColor: PAPER,
-        hoverOffset: 4,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: "65%",
-      plugins: {
-        tooltip: tooltipStyle((ctx) => `${ctx.label} — ${ctx.parsed.toFixed(2)} GB`),
-        legend:  { display: false },
+  if (pieChart) {
+    pieChart.data.labels = labels;
+    pieChart.data.datasets[0].data = data;
+    pieChart.data.datasets[0].backgroundColor = colors;
+    pieChart.update("none");
+  } else {
+    pieChart = safeChart(null, $("chart-pie"), {
+      type: "doughnut",
+      data: {
+        labels,
+        datasets: [{
+          data, backgroundColor: colors,
+          borderColor: PAPER, borderWidth: 2,
+          hoverBorderColor: PAPER, hoverOffset: 4,
+        }],
       },
-    },
-  });
+      options: PIE_OPTIONS,
+    });
+  }
 
   // ── Sweep curve — single thin terracotta line, dashed reference ──
   const sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
@@ -429,67 +404,105 @@ function renderResult(cfg, result) {
     try { return estimate({ ...cfg, world_size: N }).total / GB; }
     catch (_) { return null; } // tolerate transient errors so sweep still draws
   });
-
-  sweepChart = safeChart(sweepChart, $("chart-sweep"), {
-    type: "line",
-    data: {
-      labels: sizes,
-      datasets: [
-        {
-          label: "per-GPU peak",
-          data: sweepData,
-          borderColor: ACCENT,
-          backgroundColor: "rgba(193,74,22,0.06)",
-          borderWidth: 1.4,
-          tension: 0.3,
-          fill: true,
-          pointRadius: 3,
-          pointBackgroundColor: PAPER,
-          pointBorderColor: ACCENT,
-          pointBorderWidth: 1.2,
-          pointHoverRadius: 5,
-        },
-        ...(gpu ? [{
-          label: `${gpu.name} ceiling`,
-          data: sizes.map(() => gpu.mem_gb),
-          borderColor: INK_MUTE,
-          borderDash: [3, 3],
-          borderWidth: 1,
-          pointRadius: 0,
-          fill: false,
-        }] : []),
-      ],
+  const sweepDatasets = [
+    {
+      label: "per-GPU peak",
+      data: sweepData,
+      borderColor: ACCENT,
+      backgroundColor: "rgba(193,74,22,0.06)",
+      borderWidth: 1.4,
+      tension: 0.3,
+      fill: true,
+      pointRadius: 3,
+      pointBackgroundColor: PAPER,
+      pointBorderColor: ACCENT,
+      pointBorderWidth: 1.2,
+      pointHoverRadius: 5,
     },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      layout: { padding: { top: 6, right: 4, bottom: 0 } },
-      interaction: { mode: "index", intersect: false },
-      scales: {
-        x: { ...axisX, title: { display: true, text: "world size", color: INK_MUTE, font: { size: 12, family: '"Newsreader", serif', style: "italic" }, padding: { top: 8 } } },
-        y: { ...axisY, beginAtZero: true, title: { display: true, text: "GB per GPU", color: INK_MUTE, font: { size: 12, family: '"Newsreader", serif', style: "italic" } } },
-      },
-      plugins: {
-        tooltip: tooltipStyle((ctx) => `${ctx.parsed.y.toFixed(2)} GB at ${ctx.parsed.x} GPUs`),
-        legend:  {
-          display: true,
-          position: "bottom",
-          align: "start",
-          labels: {
-            color: INK_MUTE,
-            font: { family: '"Newsreader", serif', size: 12, style: "italic" },
-            boxWidth: 16,
-            boxHeight: 8,
-            padding: 14,
-            usePointStyle: false,
-          },
-        },
-      },
-    },
-  });
+    ...(gpu ? [{
+      label: `${gpu.name} ceiling`,
+      data: sizes.map(() => gpu.mem_gb),
+      borderColor: INK_MUTE,
+      borderDash: [3, 3],
+      borderWidth: 1,
+      pointRadius: 0,
+      fill: false,
+    }] : []),
+  ];
+  if (sweepChart) {
+    sweepChart.data.labels = sizes;
+    sweepChart.data.datasets = sweepDatasets;
+    sweepChart.update("none");
+  } else {
+    sweepChart = safeChart(null, $("chart-sweep"), {
+      type: "line",
+      data: { labels: sizes, datasets: sweepDatasets },
+      options: SWEEP_OPTIONS,
+    });
+  }
 
   renderDetails(cfg, result);
 }
+
+// Static chart options — built once, never mutated. Keeping options stable
+// lets us update only `data` on each recompute, which avoids destroy/recreate
+// cycles that can leave Chart.js in a "created but not drawn" state.
+const AXIS_TICK_FONT = { size: 11, family: '"Newsreader", serif', style: "italic" };
+const AXIS_TITLE_FONT = { size: 12, family: '"Newsreader", serif', style: "italic" };
+const AXIS_X = {
+  grid:   { color: RULE_SOFT, drawTicks: false },
+  ticks:  { color: INK_MUTE, font: AXIS_TICK_FONT, padding: 6 },
+  border: { color: RULE },
+};
+const AXIS_Y = {
+  grid:   { color: RULE_SOFT, drawTicks: false },
+  ticks:  { color: INK_MUTE, font: AXIS_TICK_FONT, padding: 8 },
+  border: { color: RULE },
+};
+const BREAKDOWN_OPTIONS = {
+  indexAxis: "y",
+  responsive: true,
+  maintainAspectRatio: false,
+  layout: { padding: 0 },
+  scales: {
+    x: { stacked: true, display: false, grid: { display: false } },
+    y: { stacked: true, display: false, grid: { display: false } },
+  },
+  plugins: {
+    tooltip: tooltipStyle((ctx) => `${ctx.dataset.label} — ${ctx.parsed.x.toFixed(2)} GB`),
+    legend:  { display: false },
+  },
+};
+const PIE_OPTIONS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  cutout: "65%",
+  plugins: {
+    tooltip: tooltipStyle((ctx) => `${ctx.label} — ${ctx.parsed.toFixed(2)} GB`),
+    legend:  { display: false },
+  },
+};
+const SWEEP_OPTIONS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  layout: { padding: { top: 6, right: 4, bottom: 0 } },
+  interaction: { mode: "index", intersect: false },
+  scales: {
+    x: { ...AXIS_X, title: { display: true, text: "world size", color: INK_MUTE, font: AXIS_TITLE_FONT, padding: { top: 8 } } },
+    y: { ...AXIS_Y, beginAtZero: true, title: { display: true, text: "GB per GPU", color: INK_MUTE, font: AXIS_TITLE_FONT } },
+  },
+  plugins: {
+    tooltip: tooltipStyle((ctx) => `${ctx.parsed.y.toFixed(2)} GB at ${ctx.parsed.x} GPUs`),
+    legend:  {
+      display: true, position: "bottom", align: "start",
+      labels: {
+        color: INK_MUTE,
+        font: { family: '"Newsreader", serif', size: 12, style: "italic" },
+        boxWidth: 16, boxHeight: 8, padding: 14, usePointStyle: false,
+      },
+    },
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Detailed calculation breakdown (collapsible)
