@@ -419,7 +419,7 @@ function renderResult(cfg, result) {
   }
 
   // ── Sweep curve — single thin terracotta line, dashed reference ──
-  const sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
+  const sizes = [1, 2, 4, 8, 16, 32, 64];
   const sweepData = sizes.map(N => {
     try { return estimate({ ...cfg, world_size: N }).total / GB; }
     catch (_) { return null; } // tolerate transient errors so sweep still draws
@@ -452,7 +452,7 @@ function renderResult(cfg, result) {
   if (sweepChart) {
     sweepChart.data.labels = sizes;
     sweepChart.data.datasets = sweepDatasets;
-    sweepChart.update("none");
+    sweepChart.update();
   } else {
     sweepChart = safeChart(null, $("chart-sweep"), {
       type: "line",
