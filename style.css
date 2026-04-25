@@ -236,6 +236,30 @@ a:hover { color: var(--accent); }
 }
 .control-suffix:focus-within .suffix { color: var(--accent); }
 
+/* Derived (read-only) value, e.g. "DP = GPUs / (TP × CP)" */
+.row.derived label { font-size: 13.5px; }
+.row.derived .hint {
+  font-style: italic;
+  color: var(--ink-faint);
+  font-size: 12px;
+  margin-left: 4px;
+}
+.derived-out {
+  display: inline-block;
+  font-family: var(--serif);
+  font-size: 14.5px;
+  font-style: italic;
+  color: var(--ink-mute);
+  background: transparent;
+  border: none;
+  border-bottom: 1px dashed var(--ink-faint);
+  padding: 4px 2px;
+  width: 92px;
+  text-align: right;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+.derived-out.invalid { color: var(--critical); border-bottom-color: var(--critical); }
+
 select.control {
   appearance: none;
   background:

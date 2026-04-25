@@ -110,19 +110,31 @@
         </fieldset>
 
         <fieldset class="group">
-          <legend>FSDP &amp; hardware</legend>
+          <legend>Parallelism &amp; hardware</legend>
           <div class="row">
-            <label for="strategy">strategy</label>
+            <label for="world_size">total GPUs</label>
+            <input id="world_size" class="control" type="number" min="1" value="8">
+          </div>
+          <div class="row">
+            <label for="tp">TP</label>
+            <input id="tp" class="control" type="number" min="1" value="1">
+          </div>
+          <div class="row">
+            <label for="cp">CP</label>
+            <input id="cp" class="control" type="number" min="1" value="1">
+          </div>
+          <div class="row derived">
+            <label>DP <span class="hint">= GPUs / (TP × CP)</span></label>
+            <output id="dp_derived" class="control derived-out">8</output>
+          </div>
+          <div class="row">
+            <label for="strategy">FSDP</label>
             <select id="strategy" class="control wide">
               <option value="FULL_SHARD" selected>FULL_SHARD · ZeRO-3</option>
               <option value="SHARD_GRAD_OP">SHARD_GRAD_OP · ZeRO-2</option>
               <option value="HYBRID_SHARD">HYBRID_SHARD</option>
               <option value="NO_SHARD">NO_SHARD · DDP</option>
             </select>
-          </div>
-          <div class="row">
-            <label for="world_size">GPUs</label>
-            <input id="world_size" class="control" type="number" min="1" value="8">
           </div>
           <div class="row" id="shard-size-row" style="display:none">
             <label for="shard_size">shard size</label>

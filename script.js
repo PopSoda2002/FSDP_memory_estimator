@@ -62,44 +62,46 @@ function estimate(cfg) {
   const counts = countParams(m);
   const P = counts.total;
 
-  const N = cfg.world_size;
+  const N  = cfg.world_size;
+  const tp = cfg.tp;                                // tensor parallel (Megatron-style, SP assumed)
+  const cp = cfg.cp;                                // context (sequence) parallel
+  // Data-parallel size = remaining GPUs after TP × CP. Clamp to ≥1.
+  const dp = Math.max(1, Math.floor(N / (tp * cp)));
+
   const compute_bytes  = PRECISION_BYTES[cfg.compute_dtype];
   const grad_bytes_lp  = compute_bytes;             // gradients in low-prec (cast on reduce)
   const master_bytes   = 4;                         // fp32 master copy held by optimizer
   const optim_bytes    = OPTIM_STATE_BYTES[cfg.optimizer];
 
-  // Sharding factor by strategy
-  // FULL_SHARD       — params, grads, optim all sharded across N
-  // SHARD_GRAD_OP    — params replicated, grads + optim sharded across N
-  // HYBRID_SHARD     — params/grads/optim sharded within shard_size, replicated across replicas
-  // NO_SHARD / DDP   — everything replicated
+  // FSDP sharding applied within the DP dimension.
+  // FULL_SHARD       — params, grads, optim all sharded across DP ranks
+  // SHARD_GRAD_OP    — params replicated, grads + optim sharded across DP
+  // HYBRID_SHARD     — sharded within shard_size, replicated across DP/shard_size
+  // NO_SHARD / DDP   — everything replicated within DP
   let shard_param = 1, shard_grad = 1, shard_optim = 1;
   if (cfg.strategy === "FULL_SHARD") {
-    shard_param = N; shard_grad = N; shard_optim = N;
+    shard_param = dp; shard_grad = dp; shard_optim = dp;
   } else if (cfg.strategy === "SHARD_GRAD_OP") {
-    shard_param = 1; shard_grad = N; shard_optim = N;
+    shard_param = 1;  shard_grad = dp; shard_optim = dp;
   } else if (cfg.strategy === "HYBRID_SHARD") {
-    const s = Math.min(cfg.shard_size || 8, N);
-    shard_param = s; shard_grad = s; shard_optim = s;
-  } else { /* DDP */
-    shard_param = 1; shard_grad = 1; shard_optim = 1;
+    const s = Math.min(cfg.shard_size || dp, dp);
+    shard_param = s;  shard_grad = s;  shard_optim = s;
   }
 
-  // Persistent state, per GPU (bytes)
-  const params_mem = compute_bytes * P / shard_param;
-  const grads_mem  = grad_bytes_lp * P / shard_grad;
-  // Master weights only exist if mixed precision (compute != fp32) or bf16 master not in use
-  const master_mem = (cfg.compute_dtype === "fp32") ? 0 : (master_bytes * P / shard_optim);
-  const optim_mem  = optim_bytes * P / shard_optim;
+  // Persistent state, per GPU (bytes).
+  // TP slices each weight matrix → divides params/grads/optim by TP first.
+  // FSDP then shards within DP.
+  const params_mem = compute_bytes * P / tp / shard_param;
+  const grads_mem  = grad_bytes_lp * P / tp / shard_grad;
+  const master_mem = (cfg.compute_dtype === "fp32") ? 0 : (master_bytes * P / tp / shard_optim);
+  const optim_mem  = optim_bytes * P / tp / shard_optim;
   const optimizer_total = master_mem + optim_mem;
 
-  // Communication / all-gather buffer
-  // Default FSDP unit = one transformer block. Peak transient = 2 blocks worth in low-prec
-  // (current block being computed + next being prefetched).
+  // Communication / all-gather buffer (FSDP all-gathers one block at a time;
+  // peak = current + prefetched next block, both already TP-sliced).
   const block_params = counts.per_layer;
-  // For DDP there is no all-gather of parameters
   const comm_mem = (cfg.strategy === "NO_SHARD") ? 0
-                 : compute_bytes * block_params * 2;
+                 : compute_bytes * (block_params / tp) * 2;
 
   // ---------------- Activations ----------------
   const s = cfg.seq_len;
@@ -109,49 +111,44 @@ function estimate(cfg) {
   const L = m.num_layers;
   const i = m.intermediate_size;
   const v = m.vocab_size;
-  const act_dtype_bytes = compute_bytes; // activations stored in compute dtype
+  const act_dtype_bytes = compute_bytes;
 
-  // Per-layer activation memory (Korthikanti et al. 2022, no TP, no SP).
-  //   sbh × 2 bytes per saved tensor, ~17 saved tensors per block ⇒ sbh·34 (for bf16)
-  // Plus attention scores (s²·b·a·2) — skipped when FlashAttention is on.
-  const act_base = s * b * h * 17 * act_dtype_bytes / 2; // 17 sbh in fp16/bf16 ≈ sbh·34
-  const act_mlp  = s * b * i * 2 * act_dtype_bytes;      // up + gate activations
-  const act_attn = cfg.flash_attn ? 0 : s * s * b * a * act_dtype_bytes; // attention scores
+  // Per-layer activation memory (Korthikanti et al. 2022).
+  // With Megatron TP+SP, residual stream and MLP intermediates split by TP.
+  // With CP, the sequence dimension is split across CP ranks.
+  // ⇒ all per-layer activation terms divide by (TP × CP).
+  const tcp = tp * cp;
+  const act_base = (s * b * h * 17 * act_dtype_bytes / 2) / tcp; // 17 sbh saved tensors
+  const act_mlp  = (s * b * i * 2 * act_dtype_bytes) / tcp;      // gate + up activations
+  // Attention scores (no FlashAttention): TP splits heads, CP splits the queries.
+  const act_attn = cfg.flash_attn ? 0 : (s * s * b * a * act_dtype_bytes) / tcp;
   const act_per_layer = act_base + act_mlp + act_attn;
 
   let act_mem = 0;
   if (cfg.act_ckpt === "none") {
     act_mem = L * act_per_layer;
   } else if (cfg.act_ckpt === "selective") {
-    // Keep MLP/norm but drop attention scores and softmax intermediates.
-    // Roughly 60% of full activation memory.
     act_mem = L * act_per_layer * 0.6;
   } else if (cfg.act_ckpt === "full") {
-    // Only the layer-input residual stream is retained for each block.
-    act_mem = L * s * b * h * act_dtype_bytes  // residual inputs
-            + act_per_layer;                    // one layer recomputed at a time
+    // residual stream still split by TP+CP
+    act_mem = L * (s * b * h * act_dtype_bytes) / tcp + act_per_layer;
   }
 
-  // Logits + loss activations (often dominate at large vocab × long seq)
-  // logits: s·b·V in compute dtype
-  // softmax + loss intermediates: often kept in fp32 for stability
-  const logits_mem = s * b * v * act_dtype_bytes;
-  const loss_mem   = s * b * v * 4; // fp32 cross-entropy
-  // If activation checkpointing wraps the lm_head it can be reduced; assume not by default.
+  // Logits + loss: vocab parallel splits V across TP; CP splits sequence.
+  const logits_mem = (s * b * v * act_dtype_bytes) / tcp;
+  const loss_mem   = (s * b * v * 4) / tcp;
   let head_act_mem = logits_mem + loss_mem;
-  if (cfg.ckpt_lm_head) head_act_mem = logits_mem; // saved logits only
+  if (cfg.ckpt_lm_head) head_act_mem = logits_mem;
 
   const act_mem_layers = act_mem;
   act_mem += head_act_mem;
 
-  // Embedding activations (s·b·h, small)
-  const embed_act = s * b * h * act_dtype_bytes;
+  // Embedding output: same TP+CP split as the residual stream.
+  const embed_act = (s * b * h * act_dtype_bytes) / tcp;
   act_mem += embed_act;
 
   // ---------------- Framework / misc ----------------
-  // PyTorch + CUDA context, NCCL buffers, cuDNN workspace, allocator fragmentation.
-  // Empirically ~1.0–2.0 GB on H100/A100.
-  const overhead = 1.5 * GB + 0.5 * GB; // baseline + workspace
+  const overhead = 1.5 * GB + 0.5 * GB;
 
   const total = params_mem + grads_mem + optimizer_total + act_mem + comm_mem + overhead;
 
@@ -169,6 +166,7 @@ function estimate(cfg) {
     total,
     _detail: {
       counts, compute_bytes, grad_bytes_lp, master_bytes, optim_bytes,
+      tp, cp, dp,
       shard_param, shard_grad, shard_optim,
       params_mem, grads_mem, master_mem, optim_mem,
       block_params, comm_mem,
@@ -239,9 +237,11 @@ function describeRun(cfg, result) {
   const fa   = cfg.flash_attn ? "FlashAttention on" : "FlashAttention off";
   const opt  = ({ adamw: "AdamW", adam: "Adam", sgd_momentum: "SGD+momentum", sgd: "SGD", adam_8bit: "Adam 8-bit" })[cfg.optimizer];
   const gpu  = window.GPU_PRESETS[cfg.gpu]?.name || cfg.gpu;
+  const { tp, cp, dp } = result._detail;
+  const parallel = `TP=<strong>${tp}</strong>, CP=<strong>${cp}</strong>, DP=<strong>${dp}</strong>`;
   return (
     `Training <strong>${modelLabel}</strong> on <strong>${cfg.world_size}× ${gpu}</strong> ` +
-    `with <strong>${strat}</strong>, <strong>${cfg.compute_dtype}</strong> precision and <strong>${opt}</strong>, ` +
+    `(${parallel}) with <strong>${strat}</strong>, <strong>${cfg.compute_dtype}</strong> and <strong>${opt}</strong>, ` +
     `at micro-batch <strong>${cfg.micro_batch}</strong> × seq <strong>${cfg.seq_len}</strong>, ${ckpt}, ${fa}.`
   );
 }
@@ -274,6 +274,8 @@ function readConfig() {
   return {
     model,
     world_size:    numInput("world_size", 1),
+    tp:            numInput("tp", 1),
+    cp:            numInput("cp", 1),
     micro_batch:   numInput("micro_batch", 1),
     seq_len:       numInput("seq_len", 1) * 1024,   // input is in k tokens
     compute_dtype: $("compute_dtype").value,
@@ -285,6 +287,24 @@ function readConfig() {
     ckpt_lm_head: $("ckpt_lm_head").checked,
     gpu:          $("gpu").value,
   };
+}
+
+// Show DP = world_size / (TP × CP). Mark invalid when TP × CP doesn't divide cleanly.
+function syncDerivedDP() {
+  const N  = numInput("world_size", 1);
+  const tp = numInput("tp", 1);
+  const cp = numInput("cp", 1);
+  const product = tp * cp;
+  const out = $("dp_derived");
+  if (!out) return;
+  const dp = N / product;
+  if (dp >= 1 && Number.isInteger(dp)) {
+    out.textContent = String(dp);
+    out.classList.remove("invalid");
+  } else {
+    out.textContent = (dp >= 1) ? dp.toFixed(2) : "<1";
+    out.classList.add("invalid");
+  }
 }
 
 function syncPresetFields() {
@@ -519,17 +539,25 @@ function renderDetails(cfg, result) {
   sections.push({
     title: 'Notation',
     calc: [
-      `P  \u2014 total number of model parameters (computed below)`,
-      `N  \u2014 world_size, number of GPUs              = ${cfg.world_size}`,
-      `h  \u2014 hidden_size, model hidden dimension     = ${fmtInt(m.hidden_size)}`,
-      `i  \u2014 intermediate_size, MLP hidden dimension  = ${fmtInt(m.intermediate_size)}`,
-      `L  \u2014 num_layers, number of transformer layers = ${m.num_layers}`,
-      `a  \u2014 num_heads, number of attention heads     = ${m.num_heads}`,
-      `s  \u2014 seq_len, sequence length                 = ${fmtInt(cfg.seq_len)}`,
-      `b  \u2014 micro_batch, per-GPU batch size          = ${cfg.micro_batch}`,
-      `V  \u2014 vocab_size                               = ${fmtInt(m.vocab_size)}`,
+      `P   \u2014 total number of model parameters (computed below)`,
+      `N   \u2014 world_size, total GPUs                  = ${cfg.world_size}`,
+      `TP  \u2014 tensor parallel size                    = ${d.tp}`,
+      `CP  \u2014 context (sequence) parallel size        = ${d.cp}`,
+      `DP  \u2014 data parallel size = N / (TP*CP)        = ${d.dp}`,
+      `h   \u2014 hidden_size, model hidden dimension     = ${fmtInt(m.hidden_size)}`,
+      `i   \u2014 intermediate_size, MLP hidden dimension  = ${fmtInt(m.intermediate_size)}`,
+      `L   \u2014 num_layers, number of transformer layers = ${m.num_layers}`,
+      `a   \u2014 num_heads, number of attention heads     = ${m.num_heads}`,
+      `s   \u2014 seq_len, sequence length                 = ${fmtInt(cfg.seq_len)}`,
+      `b   \u2014 micro_batch, per-GPU batch size          = ${cfg.micro_batch}`,
+      `V   \u2014 vocab_size                               = ${fmtInt(m.vocab_size)}`,
       ``,
       `compute_dtype = ${cfg.compute_dtype} \u2192 ${d.compute_bytes} bytes per element`,
+      ``,
+      `Parallelism convention:`,
+      `  TP slices each weight matrix and (with SP) the residual stream by TP.`,
+      `  CP slices the sequence dimension by CP across ring-attention ranks.`,
+      `  FSDP shards within the DP dimension only.`,
     ].join('\n'),
   });
 
@@ -569,10 +597,10 @@ function renderDetails(cfg, result) {
 
   // 3. Model states (sharding + params + grads + optimizer)
   const stratDesc = {
-    FULL_SHARD:    'FULL_SHARD (ZeRO-3) \u2014 params, grads, optim all sharded across N GPUs',
-    SHARD_GRAD_OP: 'SHARD_GRAD_OP (ZeRO-2) \u2014 params replicated; grads + optim sharded',
-    HYBRID_SHARD:  `HYBRID_SHARD \u2014 all sharded within shard_size=${cfg.shard_size || 8}, replicated across replicas`,
-    NO_SHARD:      'NO_SHARD (DDP) \u2014 everything replicated on each GPU',
+    FULL_SHARD:    'FULL_SHARD (ZeRO-3) \u2014 params, grads, optim all sharded across DP ranks',
+    SHARD_GRAD_OP: 'SHARD_GRAD_OP (ZeRO-2) \u2014 params replicated within DP; grads + optim sharded',
+    HYBRID_SHARD:  `HYBRID_SHARD \u2014 sharded within shard_size=${cfg.shard_size || d.dp}, replicated across DP/shard_size`,
+    NO_SHARD:      'NO_SHARD (DDP) \u2014 fully replicated within DP',
   };
   const optimDesc = {
     adamw:        'AdamW \u2014 1st moment (m) + 2nd moment (v), each fp32 \u2192 8 bytes/param',
@@ -584,27 +612,29 @@ function renderDetails(cfg, result) {
   const masterLines = cfg.compute_dtype === 'fp32'
     ? [`  compute_dtype = fp32 \u2192 no master copy needed \u2192 0 bytes`]
     : [
-        `  master_mem = 4 bytes * P / shard_optim`,
-        `             = 4 * ${fmtInt(result.P)} / ${d.shard_optim}`,
+        `  master_mem = 4 bytes * P / TP / shard_optim`,
+        `             = 4 * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_optim}`,
         `             = ${fmtInt(d.master_mem)} bytes  =  ${fmtGB(d.master_mem)} GB`,
       ];
   sections.push({
     title: 'Model states (params + grads + optimizer)',
     calc: [
-      `--- Sharding strategy ---`,
+      `--- Parallelism layout ---`,
+      `N (total GPUs) = ${cfg.world_size}    TP = ${d.tp}    CP = ${d.cp}    DP = ${d.dp}`,
+      ``,
+      `--- FSDP sharding (within DP) ---`,
       `${stratDesc[cfg.strategy]}`,
-      `N (world_size) = ${cfg.world_size}`,
       `shard_param = ${d.shard_param}    shard_grad = ${d.shard_grad}    shard_optim = ${d.shard_optim}`,
-      `  (divisor: per-GPU memory = total / shard_factor)`,
+      `  (per-GPU memory = total / TP / shard_factor)`,
       ``,
       `--- Parameters (model weights stored in ${cfg.compute_dtype}) ---`,
-      `params_mem = compute_bytes * P / shard_param`,
-      `           = ${d.compute_bytes} * ${fmtInt(result.P)} / ${d.shard_param}`,
+      `params_mem = compute_bytes * P / TP / shard_param`,
+      `           = ${d.compute_bytes} * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_param}`,
       `           = ${fmtInt(d.params_mem)} bytes  =  ${fmtGB(d.params_mem)} GB`,
       ``,
-      `--- Gradients (stored in ${cfg.compute_dtype}, cast to fp32 during reduce-scatter) ---`,
-      `grads_mem = grad_bytes * P / shard_grad`,
-      `          = ${d.grad_bytes_lp} * ${fmtInt(result.P)} / ${d.shard_grad}`,
+      `--- Gradients (stored in ${cfg.compute_dtype}) ---`,
+      `grads_mem = grad_bytes * P / TP / shard_grad`,
+      `          = ${d.grad_bytes_lp} * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_grad}`,
       `          = ${fmtInt(d.grads_mem)} bytes  =  ${fmtGB(d.grads_mem)} GB`,
       ``,
       `--- Optimizer states ---`,
@@ -614,8 +644,8 @@ function renderDetails(cfg, result) {
       ...masterLines,
       ``,
       `Optimizer state buffers (${d.optim_bytes} bytes per param):`,
-      `  optim_mem = ${d.optim_bytes} * P / shard_optim`,
-      `            = ${d.optim_bytes} * ${fmtInt(result.P)} / ${d.shard_optim}`,
+      `  optim_mem = ${d.optim_bytes} * P / TP / shard_optim`,
+      `            = ${d.optim_bytes} * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_optim}`,
       `            = ${fmtInt(d.optim_mem)} bytes  =  ${fmtGB(d.optim_mem)} GB`,
       ``,
       `Optimizer total = master_mem + optim_mem = ${fmtGB(d.master_mem)} + ${fmtGB(d.optim_mem)} = ${fmtGB(d.master_mem + d.optim_mem)} GB`,
@@ -623,17 +653,22 @@ function renderDetails(cfg, result) {
   });
 
   // 4. Activations
+  const tcp = d.tp * d.cp;
+  const tcpNote = (tcp > 1)
+    ? `  (each per-layer term is then divided by TP*CP = ${d.tp}*${d.cp} = ${tcp})`
+    : `  (TP=1 and CP=1, so no parallelism divisor applied)`;
   const actLines = [
     `Per-layer activation breakdown (stored in ${cfg.compute_dtype}, ${d.act_dtype_bytes} bytes):`,
+    tcpNote,
     ``,
     `  Saved tensors (intermediate outputs kept for backward pass):`,
-    `    = s*b*h * 17 * dtype_bytes / 2`,
-    `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.h)} * 17 * ${d.act_dtype_bytes} / 2`,
+    `    = s*b*h * 17 * dtype_bytes / 2 / (TP*CP)`,
+    `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.h)} * 17 * ${d.act_dtype_bytes} / 2 / ${tcp}`,
     `    = ${fmtInt(d.act_base)} bytes`,
     ``,
     `  MLP intermediates (gate + up projection outputs):`,
-    `    = s*b*i * 2 * dtype_bytes`,
-    `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.i)} * 2 * ${d.act_dtype_bytes}`,
+    `    = s*b*i * 2 * dtype_bytes / (TP*CP)`,
+    `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.i)} * 2 * ${d.act_dtype_bytes} / ${tcp}`,
     `    = ${fmtInt(d.act_mlp)} bytes`,
     ``,
   ];
@@ -696,10 +731,10 @@ function renderDetails(cfg, result) {
     miscLines.push(
       `Communication buffers (all-gather for FSDP parameter reconstruction):`,
       `  FSDP reconstructs weights one transformer block at a time.`,
-      `  Peak = 2 blocks in memory (current block + next block being prefetched).`,
+      `  Peak = 2 blocks in memory (current + prefetched), each already TP-sliced.`,
       `  block_params (params per layer) = ${fmtInt(d.block_params)}`,
-      `  comm_mem = compute_bytes * block_params * 2`,
-      `           = ${d.compute_bytes} * ${fmtInt(d.block_params)} * 2`,
+      `  comm_mem = compute_bytes * block_params / TP * 2`,
+      `           = ${d.compute_bytes} * ${fmtInt(d.block_params)} / ${d.tp} * 2`,
       `           = ${fmtInt(d.comm_mem)} bytes  =  ${fmtGB(d.comm_mem)} GB`,
     );
   }
@@ -805,7 +840,7 @@ function init() {
   const customOpt = document.createElement("option");
   customOpt.value = "custom"; customOpt.textContent = "Custom…";
   sel.appendChild(customOpt);
-  sel.value = "Llama-3.1-8B";
+  sel.value = "Qwen3-8B";
 
   // Populate GPU dropdown
   const gpuSel = $("gpu");
@@ -817,21 +852,20 @@ function init() {
   gpuSel.value = "H100 80GB";
 
   // Wire up listeners
+  const onChange = (el) => {
+    if (el.id === "model-preset") syncPresetFields();
+    if (el.id === "strategy") syncStrategyFields();
+    if (el.id === "world_size" || el.id === "tp" || el.id === "cp") syncDerivedDP();
+    recompute();
+  };
   document.querySelectorAll("input, select").forEach(el => {
-    el.addEventListener("input", () => {
-      if (el.id === "model-preset") syncPresetFields();
-      if (el.id === "strategy") syncStrategyFields();
-      recompute();
-    });
-    el.addEventListener("change", () => {
-      if (el.id === "model-preset") syncPresetFields();
-      if (el.id === "strategy") syncStrategyFields();
-      recompute();
-    });
+    el.addEventListener("input",  () => onChange(el));
+    el.addEventListener("change", () => onChange(el));
   });
 
   syncPresetFields();
   syncStrategyFields();
+  syncDerivedDP();
   recompute();
 }
 
