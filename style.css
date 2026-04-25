@@ -211,6 +211,31 @@ a:hover { color: var(--accent); }
 .control:focus { border-bottom-color: var(--accent); color: var(--accent); }
 .control:hover:not(:focus) { border-bottom-color: var(--ink); }
 
+/* input + trailing unit (e.g. "4 k") — keeps the underline contiguous */
+.control-suffix {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  border-bottom: 1px solid var(--ink-faint);
+  transition: border-color 120ms;
+}
+.control-suffix:focus-within { border-bottom-color: var(--accent); }
+.control-suffix:hover:not(:focus-within) { border-bottom-color: var(--ink); }
+.control.suffixed {
+  border-bottom: none;
+  width: 70px;
+  padding-right: 0;
+}
+.control.suffixed:focus { color: var(--accent); }
+.control-suffix .suffix {
+  font-family: var(--serif);
+  font-size: 13px;
+  font-style: italic;
+  color: var(--ink-faint);
+  padding-right: 2px;
+}
+.control-suffix:focus-within .suffix { color: var(--accent); }
+
 select.control {
   appearance: none;
   background:

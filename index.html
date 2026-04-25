@@ -70,7 +70,10 @@
           </div>
           <div class="row">
             <label for="seq_len">seq len</label>
-            <input id="seq_len" class="control" type="number" min="128" step="128" value="4096">
+            <span class="control-suffix">
+              <input id="seq_len" class="control suffixed" type="number" min="1" step="1" value="4">
+              <span class="suffix">k</span>
+            </span>
           </div>
           <div class="row">
             <label for="compute_dtype">precision</label>

@@ -275,7 +275,7 @@ function readConfig() {
     model,
     world_size:    numInput("world_size", 1),
     micro_batch:   numInput("micro_batch", 1),
-    seq_len:       numInput("seq_len", 128),
+    seq_len:       numInput("seq_len", 1) * 1024,   // input is in k tokens
     compute_dtype: $("compute_dtype").value,
     optimizer:    $("optimizer").value,
     strategy:     $("strategy").value,
