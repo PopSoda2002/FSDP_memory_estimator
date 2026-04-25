@@ -246,17 +246,26 @@ function describeRun(cfg, result) {
   );
 }
 
+// Read a numeric input, falling back to `min` when the field is empty / NaN
+// (which happens transiently while the user is editing). Without this, an empty
+// world_size would briefly evaluate as 0 and divide-by-zero would push every
+// chart dataset to Infinity → Chart.js silently renders nothing.
+function numInput(id, min) {
+  const v = +$(id).value;
+  return Number.isFinite(v) && v >= min ? v : min;
+}
+
 function readConfig() {
   const presetName = $("model-preset").value;
   let model;
   if (presetName === "custom") {
     model = {
-      hidden_size:       +$("hidden_size").value,
-      intermediate_size: +$("intermediate_size").value,
-      num_layers:        +$("num_layers").value,
-      num_heads:         +$("num_heads").value,
-      num_kv_heads:      +$("num_kv_heads").value,
-      vocab_size:        +$("vocab_size").value,
+      hidden_size:       numInput("hidden_size", 64),
+      intermediate_size: numInput("intermediate_size", 64),
+      num_layers:        numInput("num_layers", 1),
+      num_heads:         numInput("num_heads", 1),
+      num_kv_heads:      numInput("num_kv_heads", 1),
+      vocab_size:        numInput("vocab_size", 1),
       tie_embeddings:    $("tie_embeddings").checked,
     };
   } else {
@@ -264,13 +273,13 @@ function readConfig() {
   }
   return {
     model,
-    world_size:    +$("world_size").value,
-    micro_batch:   +$("micro_batch").value,
-    seq_len:       +$("seq_len").value,
+    world_size:    numInput("world_size", 1),
+    micro_batch:   numInput("micro_batch", 1),
+    seq_len:       numInput("seq_len", 128),
     compute_dtype: $("compute_dtype").value,
     optimizer:    $("optimizer").value,
     strategy:     $("strategy").value,
-    shard_size:   +$("shard_size").value,
+    shard_size:   numInput("shard_size", 1),
     act_ckpt:     $("act_ckpt").value,
     flash_attn:   $("flash_attn").checked,
     ckpt_lm_head: $("ckpt_lm_head").checked,
