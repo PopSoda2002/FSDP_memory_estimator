@@ -123,6 +123,10 @@
             <label for="cp">CP</label>
             <input id="cp" class="control" type="number" min="1" value="1">
           </div>
+          <div class="row" id="ep-row" style="display:none">
+            <label for="ep">EP <span class="hint">MoE only</span></label>
+            <input id="ep" class="control" type="number" min="1" value="1">
+          </div>
           <div class="row derived">
             <label>DP <span class="hint">= GPUs / (TP × CP)</span></label>
             <output id="dp_derived" class="control derived-out">8</output>

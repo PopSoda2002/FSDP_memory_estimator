@@ -25,21 +25,36 @@ function countParams(m) {
   const o_proj = num_q * head_dim * h;
   const attn = q_proj + k_proj + v_proj + o_proj;
 
-  // MLP (SwiGLU): gate, up, down
-  const mlp = 2 * h * i + i * h;
-
   // RMSNorm: 2 per layer (input + post-attn) — negligible but we count
   const norms = 2 * h;
 
-  const per_layer = attn + mlp + norms;
+  // MLP — dense (SwiGLU) or MoE (num_experts × SwiGLU + router)
+  let mlp = 0, expert = 0, router = 0, moe_i = 0, num_experts = 0, top_k = 0;
+  if (m.is_moe) {
+    moe_i       = m.moe_intermediate_size;
+    num_experts = m.num_experts;
+    top_k       = m.num_experts_per_tok;
+    expert = num_experts * (2 * h * moe_i + moe_i * h);  // gate+up+down per expert
+    router = h * num_experts;
+  } else {
+    mlp = 2 * h * i + i * h;                              // gate+up+down
+  }
+
+  // dense_per_layer: weights sharded only by TP (and FSDP within DP)
+  // expert_per_layer: also sharded by EP
+  const dense_per_layer  = attn + mlp + norms + router;
+  const expert_per_layer = expert;
+  const per_layer        = dense_per_layer + expert_per_layer;
 
   const embed = v * h;
   const lm_head = m.tie_embeddings ? 0 : v * h;
   const final_norm = h;
 
   const total = L * per_layer + embed + lm_head + final_norm;
-  return { total, per_layer, embed, lm_head, final_norm, attn, mlp, norms,
-           q_proj, k_proj, v_proj, o_proj, head_dim, num_q, num_kv };
+  return { total, per_layer, dense_per_layer, expert_per_layer,
+           embed, lm_head, final_norm, attn, mlp, norms, expert, router,
+           q_proj, k_proj, v_proj, o_proj, head_dim, num_q, num_kv,
+           is_moe: !!m.is_moe, moe_i, num_experts, top_k };
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +82,8 @@ function estimate(cfg) {
   const cp = cfg.cp;                                // context (sequence) parallel
   // Data-parallel size = remaining GPUs after TP × CP. Clamp to ≥1.
   const dp = Math.max(1, Math.floor(N / (tp * cp)));
+  // EP only applies to MoE models. Constrained to divide DP cleanly.
+  const ep = m.is_moe ? Math.max(1, Math.min(cfg.ep || 1, dp)) : 1;
 
   const compute_bytes  = PRECISION_BYTES[cfg.compute_dtype];
   const grad_bytes_lp  = compute_bytes;             // gradients in low-prec (cast on reduce)
@@ -89,19 +106,32 @@ function estimate(cfg) {
   }
 
   // Persistent state, per GPU (bytes).
-  // TP slices each weight matrix → divides params/grads/optim by TP first.
-  // FSDP then shards within DP.
-  const params_mem = compute_bytes * P / tp / shard_param;
-  const grads_mem  = grad_bytes_lp * P / tp / shard_grad;
-  const master_mem = (cfg.compute_dtype === "fp32") ? 0 : (master_bytes * P / tp / shard_optim);
-  const optim_mem  = optim_bytes * P / tp / shard_optim;
+  // Dense weights (attn, embeds, norms, router) divided by TP × FSDP shard.
+  // Expert weights also divided by EP — physically distributed across EP ranks
+  // first, then FSDP shards what's left within each EP group. Net divisor =
+  // TP × max(EP, shard_factor): under FULL_SHARD with EP ≤ DP this collapses to
+  // TP × DP, the same as dense; under DDP/SHARD_GRAD_OP, EP linearly helps.
+  const P_expert = m.num_layers * counts.expert_per_layer;  // 0 if dense
+  const P_dense  = P - P_expert;
+  const denseDiv  = (sf) => tp * sf;
+  const expertDiv = (sf) => tp * Math.max(ep, sf);
+
+  const sumByKind = (perParamBytes, sf) =>
+    (perParamBytes * P_dense  / denseDiv(sf)) +
+    (perParamBytes * P_expert / expertDiv(sf));
+
+  const params_mem = sumByKind(compute_bytes, shard_param);
+  const grads_mem  = sumByKind(grad_bytes_lp, shard_grad);
+  const master_mem = (cfg.compute_dtype === "fp32") ? 0 : sumByKind(master_bytes, shard_optim);
+  const optim_mem  = sumByKind(optim_bytes,   shard_optim);
   const optimizer_total = master_mem + optim_mem;
 
   // Communication / all-gather buffer (FSDP all-gathers one block at a time;
-  // peak = current + prefetched next block, both already TP-sliced).
-  const block_params = counts.per_layer;
+  // peak = current + prefetched next block, both already TP-sliced; expert
+  // portion further reduced by EP since each rank only owns num_experts/EP of them).
+  const block_params = (counts.dense_per_layer / tp) + (counts.expert_per_layer / (tp * ep));
   const comm_mem = (cfg.strategy === "NO_SHARD") ? 0
-                 : compute_bytes * (block_params / tp) * 2;
+                 : compute_bytes * block_params * 2;
 
   // ---------------- Activations ----------------
   const s = cfg.seq_len;
@@ -119,7 +149,12 @@ function estimate(cfg) {
   // ⇒ all per-layer activation terms divide by (TP × CP).
   const tcp = tp * cp;
   const act_base = (s * b * h * 17 * act_dtype_bytes / 2) / tcp; // 17 sbh saved tensors
-  const act_mlp  = (s * b * i * 2 * act_dtype_bytes) / tcp;      // gate + up activations
+  // MLP intermediates — for MoE, each token routes to top_k experts; with EP,
+  // each rank holds num_experts/EP experts, so its share of routed activations
+  // is (top_k × s × b) / EP × (gate+up) × moe_intermediate_size.
+  const act_mlp = m.is_moe
+    ? (s * b * counts.moe_i * counts.top_k * 2 * act_dtype_bytes) / tcp / ep
+    : (s * b * i * 2 * act_dtype_bytes) / tcp;
   // Attention scores (no FlashAttention): TP splits heads, CP splits the queries.
   const act_attn = cfg.flash_attn ? 0 : (s * s * b * a * act_dtype_bytes) / tcp;
   const act_per_layer = act_base + act_mlp + act_attn;
@@ -166,7 +201,8 @@ function estimate(cfg) {
     total,
     _detail: {
       counts, compute_bytes, grad_bytes_lp, master_bytes, optim_bytes,
-      tp, cp, dp,
+      tp, cp, dp, ep,
+      P_dense, P_expert,
       shard_param, shard_grad, shard_optim,
       params_mem, grads_mem, master_mem, optim_mem,
       block_params, comm_mem,
@@ -237,12 +273,18 @@ function describeRun(cfg, result) {
   const fa   = cfg.flash_attn ? "FlashAttention on" : "FlashAttention off";
   const opt  = ({ adamw: "AdamW", adam: "Adam", sgd_momentum: "SGD+momentum", sgd: "SGD", adam_8bit: "Adam 8-bit" })[cfg.optimizer];
   const gpu  = window.GPU_PRESETS[cfg.gpu]?.name || cfg.gpu;
-  const { tp, cp, dp } = result._detail;
-  const parallel = `TP=<strong>${tp}</strong>, CP=<strong>${cp}</strong>, DP=<strong>${dp}</strong>`;
+  const { tp, cp, dp, ep } = result._detail;
+  const c = result._detail.counts;
+  const parallel = c.is_moe
+    ? `TP=<strong>${tp}</strong>, CP=<strong>${cp}</strong>, EP=<strong>${ep}</strong>, DP=<strong>${dp}</strong>`
+    : `TP=<strong>${tp}</strong>, CP=<strong>${cp}</strong>, DP=<strong>${dp}</strong>`;
+  const moeNote = c.is_moe
+    ? ` MoE: <strong>${c.num_experts}</strong> experts, <strong>${c.top_k}</strong> active per token.`
+    : ``;
   return (
     `Training <strong>${modelLabel}</strong> on <strong>${cfg.world_size}× ${gpu}</strong> ` +
     `(${parallel}) with <strong>${strat}</strong>, <strong>${cfg.compute_dtype}</strong> and <strong>${opt}</strong>, ` +
-    `at micro-batch <strong>${cfg.micro_batch}</strong> × seq <strong>${cfg.seq_len}</strong>, ${ckpt}, ${fa}.`
+    `at micro-batch <strong>${cfg.micro_batch}</strong> × seq <strong>${cfg.seq_len}</strong>, ${ckpt}, ${fa}.${moeNote}`
   );
 }
 
@@ -276,6 +318,7 @@ function readConfig() {
     world_size:    numInput("world_size", 1),
     tp:            numInput("tp", 1),
     cp:            numInput("cp", 1),
+    ep:            numInput("ep", 1),
     micro_batch:   numInput("micro_batch", 1),
     seq_len:       numInput("seq_len", 1) * 1024,   // input is in k tokens
     compute_dtype: $("compute_dtype").value,
@@ -289,20 +332,24 @@ function readConfig() {
   };
 }
 
-// Show DP = world_size / (TP × CP). Mark invalid when TP × CP doesn't divide cleanly.
+// Show DP = world_size / (TP × CP). Mark invalid when TP × CP doesn't divide
+// cleanly, or when EP doesn't divide DP (for MoE models).
 function syncDerivedDP() {
   const N  = numInput("world_size", 1);
   const tp = numInput("tp", 1);
   const cp = numInput("cp", 1);
-  const product = tp * cp;
+  const ep = numInput("ep", 1);
   const out = $("dp_derived");
   if (!out) return;
-  const dp = N / product;
-  if (dp >= 1 && Number.isInteger(dp)) {
+  const dp = N / (tp * cp);
+  const dpClean = dp >= 1 && Number.isInteger(dp);
+  const epRowVisible = $("ep-row").style.display !== "none";
+  const epClean = !epRowVisible || (ep <= dp && Number.isInteger(dp / ep));
+  if (dpClean && epClean) {
     out.textContent = String(dp);
     out.classList.remove("invalid");
   } else {
-    out.textContent = (dp >= 1) ? dp.toFixed(2) : "<1";
+    out.textContent = dpClean ? String(dp) : (dp >= 1 ? dp.toFixed(2) : "<1");
     out.classList.add("invalid");
   }
 }
@@ -310,8 +357,11 @@ function syncDerivedDP() {
 function syncPresetFields() {
   const presetName = $("model-preset").value;
   const customFields = $("custom-fields");
+  const epRow = $("ep-row");
   if (presetName === "custom") {
     customFields.style.display = "";
+    epRow.style.display = "none";
+    $("ep").value = 1;
     return;
   }
   customFields.style.display = "none";
@@ -323,6 +373,14 @@ function syncPresetFields() {
   $("num_kv_heads").value      = m.num_kv_heads || m.num_heads;
   $("vocab_size").value        = m.vocab_size;
   $("tie_embeddings").checked  = !!m.tie_embeddings;
+
+  // EP is only meaningful for MoE; reset to 1 when switching away.
+  if (m.is_moe) {
+    epRow.style.display = "";
+  } else {
+    epRow.style.display = "none";
+    $("ep").value = 1;
+  }
 }
 
 function syncStrategyFields() {
@@ -536,45 +594,79 @@ function renderDetails(cfg, result) {
   const sections = [];
 
   // 1. Notation
-  sections.push({
-    title: 'Notation',
-    calc: [
-      `P   \u2014 total number of model parameters (computed below)`,
-      `N   \u2014 world_size, total GPUs                  = ${cfg.world_size}`,
-      `TP  \u2014 tensor parallel size                    = ${d.tp}`,
-      `CP  \u2014 context (sequence) parallel size        = ${d.cp}`,
-      `DP  \u2014 data parallel size = N / (TP*CP)        = ${d.dp}`,
-      `h   \u2014 hidden_size, model hidden dimension     = ${fmtInt(m.hidden_size)}`,
-      `i   \u2014 intermediate_size, MLP hidden dimension  = ${fmtInt(m.intermediate_size)}`,
-      `L   \u2014 num_layers, number of transformer layers = ${m.num_layers}`,
-      `a   \u2014 num_heads, number of attention heads     = ${m.num_heads}`,
-      `s   \u2014 seq_len, sequence length                 = ${fmtInt(cfg.seq_len)}`,
-      `b   \u2014 micro_batch, per-GPU batch size          = ${cfg.micro_batch}`,
-      `V   \u2014 vocab_size                               = ${fmtInt(m.vocab_size)}`,
-      ``,
-      `compute_dtype = ${cfg.compute_dtype} \u2192 ${d.compute_bytes} bytes per element`,
-      ``,
-      `Parallelism convention:`,
-      `  TP slices each weight matrix and (with SP) the residual stream by TP.`,
-      `  CP slices the sequence dimension by CP across ring-attention ranks.`,
-      `  FSDP shards within the DP dimension only.`,
-    ].join('\n'),
-  });
+  const notationLines = [
+    `P   \u2014 total number of model parameters (computed below)`,
+    `N   \u2014 world_size, total GPUs                  = ${cfg.world_size}`,
+    `TP  \u2014 tensor parallel size                    = ${d.tp}`,
+    `CP  \u2014 context (sequence) parallel size        = ${d.cp}`,
+    `DP  \u2014 data parallel size = N / (TP*CP)        = ${d.dp}`,
+  ];
+  if (c.is_moe) {
+    notationLines.push(
+      `EP  \u2014 expert parallel size (MoE only)         = ${d.ep}    (must divide DP)`,
+    );
+  }
+  notationLines.push(
+    `h   \u2014 hidden_size, model hidden dimension     = ${fmtInt(m.hidden_size)}`,
+    c.is_moe
+      ? `i_e \u2014 moe_intermediate_size (per expert)      = ${fmtInt(c.moe_i)}`
+      : `i   \u2014 intermediate_size, MLP hidden dimension  = ${fmtInt(m.intermediate_size)}`,
+    `L   \u2014 num_layers, number of transformer layers = ${m.num_layers}`,
+    `a   \u2014 num_heads, number of attention heads     = ${m.num_heads}`,
+    `s   \u2014 seq_len, sequence length                 = ${fmtInt(cfg.seq_len)}`,
+    `b   \u2014 micro_batch, per-GPU batch size          = ${cfg.micro_batch}`,
+    `V   \u2014 vocab_size                               = ${fmtInt(m.vocab_size)}`,
+  );
+  if (c.is_moe) {
+    notationLines.push(
+      `E   \u2014 num_experts                              = ${c.num_experts}`,
+      `k   \u2014 num_experts_per_tok (top-k routing)      = ${c.top_k}`,
+    );
+  }
+  notationLines.push(
+    ``,
+    `compute_dtype = ${cfg.compute_dtype} \u2192 ${d.compute_bytes} bytes per element`,
+    ``,
+    `Parallelism convention:`,
+    `  TP slices each weight matrix and (with SP) the residual stream by TP.`,
+    `  CP slices the sequence dimension by CP across ring-attention ranks.`,
+    `  FSDP shards within the DP dimension only.`,
+  );
+  if (c.is_moe) {
+    notationLines.push(
+      `  EP shards experts across EP ranks within DP (each rank holds E/EP experts).`,
+    );
+  }
+  sections.push({ title: 'Notation', calc: notationLines.join('\n') });
 
   // 2. Parameter Count
-  sections.push({
-    title: 'Parameter count (P)',
-    calc: [
-      `head_dim = h / a = ${m.hidden_size} / ${c.num_q} = ${c.head_dim}`,
-      `num_kv_heads = ${c.num_kv}  (for GQA/MQA; equals a if standard MHA)`,
+  const paramLines = [
+    `head_dim = h / a = ${m.hidden_size} / ${c.num_q} = ${c.head_dim}`,
+    `num_kv_heads = ${c.num_kv}  (for GQA/MQA; equals a if standard MHA)`,
+    ``,
+    `Attention (per layer):`,
+    `  q_proj = h * a * head_dim           = ${m.hidden_size} * ${c.num_q} * ${c.head_dim} = ${fmtInt(c.q_proj)}`,
+    `  k_proj = h * num_kv_heads * head_dim = ${m.hidden_size} * ${c.num_kv} * ${c.head_dim} = ${fmtInt(c.k_proj)}`,
+    `  v_proj = h * num_kv_heads * head_dim = ${m.hidden_size} * ${c.num_kv} * ${c.head_dim} = ${fmtInt(c.v_proj)}`,
+    `  o_proj = a * head_dim * h           = ${c.num_q} * ${c.head_dim} * ${m.hidden_size} = ${fmtInt(c.o_proj)}`,
+    `  attn   = q + k + v + o = ${fmtInt(c.attn)}`,
+    ``,
+  ];
+  if (c.is_moe) {
+    paramLines.push(
+      `MoE block (per layer): E=${c.num_experts} experts \u00d7 SwiGLU(h, i_e) + router`,
+      `  per-expert = 3 * h * i_e = 3 * ${m.hidden_size} * ${fmtInt(c.moe_i)} = ${fmtInt(3 * m.hidden_size * c.moe_i)}`,
+      `  experts   = E * per-expert = ${c.num_experts} * ${fmtInt(3 * m.hidden_size * c.moe_i)} = ${fmtInt(c.expert)}`,
+      `  router    = h * E = ${m.hidden_size} * ${c.num_experts} = ${fmtInt(c.router)}`,
       ``,
-      `Attention (per layer):`,
-      `  q_proj = h * a * head_dim           = ${m.hidden_size} * ${c.num_q} * ${c.head_dim} = ${fmtInt(c.q_proj)}`,
-      `  k_proj = h * num_kv_heads * head_dim = ${m.hidden_size} * ${c.num_kv} * ${c.head_dim} = ${fmtInt(c.k_proj)}`,
-      `  v_proj = h * num_kv_heads * head_dim = ${m.hidden_size} * ${c.num_kv} * ${c.head_dim} = ${fmtInt(c.v_proj)}`,
-      `  o_proj = a * head_dim * h           = ${c.num_q} * ${c.head_dim} * ${m.hidden_size} = ${fmtInt(c.o_proj)}`,
-      `  attn   = q + k + v + o = ${fmtInt(c.attn)}`,
+      `RMSNorm (per layer): 2 * h = ${fmtInt(c.norms)}`,
+      `Per-layer total = attn + experts + router + norms = ${fmtInt(c.per_layer)}`,
+      `  dense_per_layer  (sharded by TP only) = ${fmtInt(c.dense_per_layer)}`,
+      `  expert_per_layer (sharded by TP \u00d7 EP) = ${fmtInt(c.expert_per_layer)}`,
       ``,
+    );
+  } else {
+    paramLines.push(
       `MLP \u2014 SwiGLU (per layer):`,
       `  gate + up = 2 * h * i = 2 * ${m.hidden_size} * ${fmtInt(m.intermediate_size)} = ${fmtInt(2 * m.hidden_size * m.intermediate_size)}`,
       `  down     = i * h = ${fmtInt(m.intermediate_size)} * ${m.hidden_size} = ${fmtInt(m.intermediate_size * m.hidden_size)}`,
@@ -583,17 +675,29 @@ function renderDetails(cfg, result) {
       `RMSNorm (per layer): 2 * h = 2 * ${m.hidden_size} = ${fmtInt(c.norms)}`,
       `Per-layer total = attn + mlp + norms = ${fmtInt(c.per_layer)}`,
       ``,
-      `Embedding  = V * h = ${fmtInt(d.v)} * ${m.hidden_size} = ${fmtInt(c.embed)}`,
-      m.tie_embeddings
-        ? `LM head    = 0 (tied with embedding)`
-        : `LM head    = V * h = ${fmtInt(d.v)} * ${m.hidden_size} = ${fmtInt(c.lm_head)}`,
-      `Final norm = h = ${m.hidden_size}`,
+    );
+  }
+  paramLines.push(
+    `Embedding  = V * h = ${fmtInt(d.v)} * ${m.hidden_size} = ${fmtInt(c.embed)}`,
+    m.tie_embeddings
+      ? `LM head    = 0 (tied with embedding)`
+      : `LM head    = V * h = ${fmtInt(d.v)} * ${m.hidden_size} = ${fmtInt(c.lm_head)}`,
+    `Final norm = h = ${m.hidden_size}`,
+    ``,
+    `P = L * per_layer + embedding + lm_head + final_norm`,
+    `  = ${d.L} * ${fmtInt(c.per_layer)} + ${fmtInt(c.embed)} + ${fmtInt(c.lm_head)} + ${c.final_norm}`,
+    `  = ${fmtInt(result.P)}  (${fmtParams(result.P)})`,
+  );
+  if (c.is_moe) {
+    const active = result.P - d.P_expert + d.P_expert * c.top_k / c.num_experts;
+    paramLines.push(
       ``,
-      `P = L * per_layer + embedding + lm_head + final_norm`,
-      `  = ${d.L} * ${fmtInt(c.per_layer)} + ${fmtInt(c.embed)} + ${fmtInt(c.lm_head)} + ${c.final_norm}`,
-      `  = ${fmtInt(result.P)}  (${fmtParams(result.P)})`,
-    ].join('\n'),
-  });
+      `Active params per token = P_dense + P_expert \u00d7 k/E`,
+      `                        = ${fmtInt(d.P_dense)} + ${fmtInt(d.P_expert)} \u00d7 ${c.top_k}/${c.num_experts}`,
+      `                        \u2248 ${fmtInt(active)}  (${fmtParams(active)})`,
+    );
+  }
+  sections.push({ title: 'Parameter count (P)', calc: paramLines.join('\n') });
 
   // 3. Model states (sharding + params + grads + optimizer)
   const stratDesc = {
@@ -609,48 +713,64 @@ function renderDetails(cfg, result) {
     sgd:          'SGD (vanilla, no state) \u2192 0 bytes/param',
     adam_8bit:    'Adam 8-bit (bnb quantised m+v) \u2192 2 bytes/param',
   };
+  const expertNote = c.is_moe
+    ? `  Expert weights add an extra divisor: total / (TP \u00d7 max(EP, shard_factor))\n  Dense weights (attn, embed, norm, router): total / (TP \u00d7 shard_factor)`
+    : null;
+  const fmtSplitFormula = (perBytes, sf, val) => {
+    if (!c.is_moe) {
+      return [
+        `= ${perBytes} * P / TP / shard = ${perBytes} * ${fmtInt(result.P)} / ${d.tp} / ${sf}`,
+        `= ${fmtInt(val)} bytes  =  ${fmtGB(val)} GB`,
+      ];
+    }
+    const denseTerm  = perBytes * d.P_dense  / (d.tp * sf);
+    const expertTerm = perBytes * d.P_expert / (d.tp * Math.max(d.ep, sf));
+    return [
+      `= [${perBytes} * P_dense  / (TP \u00d7 shard)] + [${perBytes} * P_expert / (TP \u00d7 max(EP, shard))]`,
+      `= [${perBytes} * ${fmtInt(d.P_dense)}  / (${d.tp} \u00d7 ${sf})] + [${perBytes} * ${fmtInt(d.P_expert)} / (${d.tp} \u00d7 max(${d.ep}, ${sf}))]`,
+      `= ${fmtGB(denseTerm)} GB + ${fmtGB(expertTerm)} GB = ${fmtGB(val)} GB`,
+    ];
+  };
   const masterLines = cfg.compute_dtype === 'fp32'
     ? [`  compute_dtype = fp32 \u2192 no master copy needed \u2192 0 bytes`]
-    : [
-        `  master_mem = 4 bytes * P / TP / shard_optim`,
-        `             = 4 * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_optim}`,
-        `             = ${fmtInt(d.master_mem)} bytes  =  ${fmtGB(d.master_mem)} GB`,
-      ];
-  sections.push({
-    title: 'Model states (params + grads + optimizer)',
-    calc: [
-      `--- Parallelism layout ---`,
-      `N (total GPUs) = ${cfg.world_size}    TP = ${d.tp}    CP = ${d.cp}    DP = ${d.dp}`,
-      ``,
-      `--- FSDP sharding (within DP) ---`,
-      `${stratDesc[cfg.strategy]}`,
-      `shard_param = ${d.shard_param}    shard_grad = ${d.shard_grad}    shard_optim = ${d.shard_optim}`,
-      `  (per-GPU memory = total / TP / shard_factor)`,
-      ``,
-      `--- Parameters (model weights stored in ${cfg.compute_dtype}) ---`,
-      `params_mem = compute_bytes * P / TP / shard_param`,
-      `           = ${d.compute_bytes} * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_param}`,
-      `           = ${fmtInt(d.params_mem)} bytes  =  ${fmtGB(d.params_mem)} GB`,
-      ``,
-      `--- Gradients (stored in ${cfg.compute_dtype}) ---`,
-      `grads_mem = grad_bytes * P / TP / shard_grad`,
-      `          = ${d.grad_bytes_lp} * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_grad}`,
-      `          = ${fmtInt(d.grads_mem)} bytes  =  ${fmtGB(d.grads_mem)} GB`,
-      ``,
-      `--- Optimizer states ---`,
-      `Optimizer: ${optimDesc[cfg.optimizer]}`,
-      ``,
-      `Master weights (fp32 copy, needed when compute_dtype != fp32):`,
-      ...masterLines,
-      ``,
-      `Optimizer state buffers (${d.optim_bytes} bytes per param):`,
-      `  optim_mem = ${d.optim_bytes} * P / TP / shard_optim`,
-      `            = ${d.optim_bytes} * ${fmtInt(result.P)} / ${d.tp} / ${d.shard_optim}`,
-      `            = ${fmtInt(d.optim_mem)} bytes  =  ${fmtGB(d.optim_mem)} GB`,
-      ``,
-      `Optimizer total = master_mem + optim_mem = ${fmtGB(d.master_mem)} + ${fmtGB(d.optim_mem)} = ${fmtGB(d.master_mem + d.optim_mem)} GB`,
-    ].join('\n'),
-  });
+    : [`  master_mem ${fmtSplitFormula(4, d.shard_optim, d.master_mem)[0]}`,
+       `             ${fmtSplitFormula(4, d.shard_optim, d.master_mem).slice(1).join('\n             ')}`];
+  const layoutLine = c.is_moe
+    ? `N = ${cfg.world_size}    TP = ${d.tp}    CP = ${d.cp}    EP = ${d.ep}    DP = ${d.dp}`
+    : `N = ${cfg.world_size}    TP = ${d.tp}    CP = ${d.cp}    DP = ${d.dp}`;
+  const stateLines = [
+    `--- Parallelism layout ---`,
+    layoutLine,
+    ``,
+    `--- FSDP sharding (within DP) ---`,
+    `${stratDesc[cfg.strategy]}`,
+    `shard_param = ${d.shard_param}    shard_grad = ${d.shard_grad}    shard_optim = ${d.shard_optim}`,
+    `  (per-GPU memory = total / TP / shard_factor)`,
+  ];
+  if (expertNote) stateLines.push(expertNote);
+  stateLines.push(
+    ``,
+    `--- Parameters (stored in ${cfg.compute_dtype}, ${d.compute_bytes} bytes/param) ---`,
+    `params_mem ${fmtSplitFormula(d.compute_bytes, d.shard_param, d.params_mem)[0]}`,
+    `             ${fmtSplitFormula(d.compute_bytes, d.shard_param, d.params_mem).slice(1).join('\n             ')}`,
+    ``,
+    `--- Gradients (stored in ${cfg.compute_dtype}) ---`,
+    `grads_mem  ${fmtSplitFormula(d.grad_bytes_lp, d.shard_grad, d.grads_mem)[0]}`,
+    `             ${fmtSplitFormula(d.grad_bytes_lp, d.shard_grad, d.grads_mem).slice(1).join('\n             ')}`,
+    ``,
+    `--- Optimizer states ---`,
+    `Optimizer: ${optimDesc[cfg.optimizer]}`,
+    ``,
+    `Master weights (fp32 copy, needed when compute_dtype != fp32):`,
+    ...masterLines,
+    ``,
+    `Optimizer state buffers (${d.optim_bytes} bytes per param):`,
+    `  optim_mem ${fmtSplitFormula(d.optim_bytes, d.shard_optim, d.optim_mem)[0]}`,
+    `              ${fmtSplitFormula(d.optim_bytes, d.shard_optim, d.optim_mem).slice(1).join('\n              ')}`,
+    ``,
+    `Optimizer total = master_mem + optim_mem = ${fmtGB(d.master_mem)} + ${fmtGB(d.optim_mem)} = ${fmtGB(d.master_mem + d.optim_mem)} GB`,
+  );
+  sections.push({ title: 'Model states (params + grads + optimizer)', calc: stateLines.join('\n') });
 
   // 4. Activations
   const tcp = d.tp * d.cp;
@@ -666,12 +786,25 @@ function renderDetails(cfg, result) {
     `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.h)} * 17 * ${d.act_dtype_bytes} / 2 / ${tcp}`,
     `    = ${fmtInt(d.act_base)} bytes`,
     ``,
-    `  MLP intermediates (gate + up projection outputs):`,
-    `    = s*b*i * 2 * dtype_bytes / (TP*CP)`,
-    `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.i)} * 2 * ${d.act_dtype_bytes} / ${tcp}`,
-    `    = ${fmtInt(d.act_mlp)} bytes`,
-    ``,
   ];
+  if (c.is_moe) {
+    actLines.push(
+      `  MoE MLP intermediates — only top-k experts fire per token, and EP further`,
+      `  splits experts across ranks (each rank handles 1/EP of routed activations):`,
+      `    = s*b * k * 2*i_e * dtype / (TP*CP) / EP`,
+      `    = ${fmtInt(d.s)} * ${d.b} * ${c.top_k} * 2*${fmtInt(c.moe_i)} * ${d.act_dtype_bytes} / ${tcp} / ${d.ep}`,
+      `    = ${fmtInt(d.act_mlp)} bytes`,
+      ``,
+    );
+  } else {
+    actLines.push(
+      `  MLP intermediates (gate + up projection outputs):`,
+      `    = s*b*i * 2 * dtype_bytes / (TP*CP)`,
+      `    = ${fmtInt(d.s)} * ${d.b} * ${fmtInt(d.i)} * 2 * ${d.act_dtype_bytes} / ${tcp}`,
+      `    = ${fmtInt(d.act_mlp)} bytes`,
+      ``,
+    );
+  }
   if (!cfg.flash_attn) {
     actLines.push(
       `  Attention score matrix (s*s per head, materialised without FlashAttention):`,
@@ -728,13 +861,16 @@ function renderDetails(cfg, result) {
   if (cfg.strategy === 'NO_SHARD') {
     miscLines.push(`Communication buffers:`, `  Strategy = NO_SHARD (DDP) \u2192 no all-gather of parameters needed`, `  comm_mem = 0`);
   } else {
+    const blockFormula = c.is_moe
+      ? `block_params = dense_per_layer / TP + expert_per_layer / (TP × EP)\n             = ${fmtInt(c.dense_per_layer)} / ${d.tp} + ${fmtInt(c.expert_per_layer)} / (${d.tp} × ${d.ep}) = ${fmtInt(d.block_params)}`
+      : `block_params = per_layer / TP = ${fmtInt(c.per_layer)} / ${d.tp} = ${fmtInt(d.block_params)}`;
     miscLines.push(
       `Communication buffers (all-gather for FSDP parameter reconstruction):`,
       `  FSDP reconstructs weights one transformer block at a time.`,
       `  Peak = 2 blocks in memory (current + prefetched), each already TP-sliced.`,
-      `  block_params (params per layer) = ${fmtInt(d.block_params)}`,
-      `  comm_mem = compute_bytes * block_params / TP * 2`,
-      `           = ${d.compute_bytes} * ${fmtInt(d.block_params)} / ${d.tp} * 2`,
+      `  ${blockFormula}`,
+      `  comm_mem = compute_bytes * block_params * 2`,
+      `           = ${d.compute_bytes} * ${fmtInt(d.block_params)} * 2`,
       `           = ${fmtInt(d.comm_mem)} bytes  =  ${fmtGB(d.comm_mem)} GB`,
     );
   }
@@ -855,7 +991,8 @@ function init() {
   const onChange = (el) => {
     if (el.id === "model-preset") syncPresetFields();
     if (el.id === "strategy") syncStrategyFields();
-    if (el.id === "world_size" || el.id === "tp" || el.id === "cp") syncDerivedDP();
+    if (el.id === "world_size" || el.id === "tp" || el.id === "cp" || el.id === "ep") syncDerivedDP();
+    if (el.id === "model-preset") syncDerivedDP();
     recompute();
   };
   document.querySelectorAll("input, select").forEach(el => {

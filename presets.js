@@ -17,6 +17,10 @@ window.MODEL_PRESETS = {
   "Qwen3-8B":        { family: "Qwen3", hidden_size: 4096,  intermediate_size: 12288, num_layers: 36,  num_heads: 32,  num_kv_heads: 8, head_dim: 128, vocab_size: 151936, tie_embeddings: false },
   "Qwen3-14B":       { family: "Qwen3", hidden_size: 5120,  intermediate_size: 17408, num_layers: 40,  num_heads: 40,  num_kv_heads: 8, head_dim: 128, vocab_size: 151936, tie_embeddings: false },
   "Qwen3-32B":       { family: "Qwen3", hidden_size: 5120,  intermediate_size: 25600, num_layers: 64,  num_heads: 64,  num_kv_heads: 8, head_dim: 128, vocab_size: 151936, tie_embeddings: false },
+
+  // Qwen3 MoE — 30.5B total / 3.3B active. 128 experts, 8 per token, moe_intermediate_size=768.
+  "Qwen3-30B-A3B":   { family: "Qwen3", hidden_size: 2048,  intermediate_size: 6144,  num_layers: 48,  num_heads: 32,  num_kv_heads: 4, head_dim: 128, vocab_size: 151936, tie_embeddings: false,
+                       is_moe: true, num_experts: 128, num_experts_per_tok: 8, moe_intermediate_size: 768 },
 };
 
 window.MODEL_FAMILY_ORDER = ["Qwen3"];
