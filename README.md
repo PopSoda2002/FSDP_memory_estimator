@@ -8,16 +8,6 @@ Pick a model preset (Llama / Qwen / Mistral / Gemma / Phi) or punch in a custom 
 choose your sharding strategy, precision and activation-checkpointing, and see the per-GPU
 breakdown plus a sweep over `world_size`.
 
-## Run locally
-
-```bash
-git clone https://github.com/PopSoda2002/FSDP_memory_estimator.git
-cd FSDP_memory_estimator && python3 -m http.server 8000
-# open http://localhost:8000
-```
-
-Pure static site — no build step, no backend.
-
 ## What it covers
 
 - Sharding: `FULL_SHARD` (ZeRO-3), `SHARD_GRAD_OP` (ZeRO-2), `HYBRID_SHARD`, `NO_SHARD` (DDP)
